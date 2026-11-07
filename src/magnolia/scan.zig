@@ -24,6 +24,9 @@ const StrokeState = struct {
     /// self-overlaps, a stroked outline being one closed region, so the two
     /// only diverge on content that does not exist here yet.
     opacity: f32 = 1,
+    /// Stroke paint. Separate from the fill colour: an element routinely has
+    /// `fill:none;stroke:#fff`, so the two cannot share one field.
+    color: ?[3]u8 = null,
 };
 const DStats = pathdata.DStats;
 
@@ -112,6 +115,11 @@ pub const Scanner = struct {
     inherited_stroke: ?StrokeState = null,
     /// True when the nearest ancestor said fill="none".
     inherited_no_fill: bool = false,
+    /// Inherited fill colour. Null means "let the caller pick" (an icon with no
+    /// colour of its own), which keeps flat-icon callers working unchanged.
+    /// Paint servers (`url(#grad)`) cannot be resolved here, so they leave this
+    /// null and land in the report instead.
+    inherited_fill: ?[3]u8 = null,
     /// Inherited `opacity` for the element currently being dispatched. Unlike
     /// stroke opacity this applies to fills too, so it lives beside the fill
     /// state rather than inside StrokeState.
@@ -134,6 +142,8 @@ pub const Scanner = struct {
         defer stroke_stack.deinit(self.gpa);
         var no_fill_stack: std.ArrayList(bool) = .empty;
         defer no_fill_stack.deinit(self.gpa);
+        var fill_stack: std.ArrayList(?[3]u8) = .empty;
+        defer fill_stack.deinit(self.gpa);
         var depth: usize = 0;
         var skip_depth: ?usize = null;
 
@@ -163,6 +173,7 @@ pub const Scanner = struct {
                 if (rule_stack.pop()) |v| self.rule = v;
                 if (stroke_stack.pop()) |v| self.inherited_stroke = v;
                 if (no_fill_stack.pop()) |v| self.inherited_no_fill = v;
+                if (fill_stack.pop()) |v| self.inherited_fill = v;
                 if (skip_depth) |sd| {
                     if (depth < sd) {
                         skip_depth = null;
@@ -227,6 +238,7 @@ pub const Scanner = struct {
                 try rule_stack.append(self.gpa, self.rule);
                 try stroke_stack.append(self.gpa, self.inherited_stroke);
                 try no_fill_stack.append(self.gpa, self.inherited_no_fill);
+                try fill_stack.append(self.gpa, self.inherited_fill);
                 ctm = eff;
                 depth += 1;
                 if (skip_depth == null and isSkipTag(name)) skip_depth = depth;
@@ -290,6 +302,7 @@ pub const Scanner = struct {
                 try saved.edges.append(self.gpa, e);
                 try saved.rules.append(self.gpa, if (i < scratch.rules.items.len) scratch.rules.items[i] else saved.rule);
                 try saved.alphas.append(self.gpa, if (i < scratch.alphas.items.len) scratch.alphas.items[i] else saved.alpha);
+                try saved.colors.append(self.gpa, if (i < scratch.colors.items.len) scratch.colors.items[i] else scratch.color);
             }
             for (scratch.subpaths.items) |s| try saved.subpaths.append(self.gpa, base + s);
             return;
@@ -310,6 +323,11 @@ pub const Scanner = struct {
     }
 
     fn strokeScratch(self: *Scanner, dest: *PathBuf, scratch: *PathBuf, opts: stroke.Options, eff: geom.Mat) !void {
+        // A stroked outline is painted with the STROKE colour, which is a
+        // different property from the fill. Using the centreline's fill colour
+        // here painted the daisy's white petals in whatever the shape's fill
+        // resolved to.
+        const stroke_color: ?[3]u8 = if (self.inherited_stroke) |s| s.color else null;
         var pts: std.ArrayList(Pt) = .empty;
         defer pts.deinit(self.gpa);
         var out: std.ArrayList(geom.Edge) = .empty;
@@ -344,6 +362,9 @@ pub const Scanner = struct {
             try dest.edges.appendSlice(self.gpa, out.items);
             try dest.rules.appendNTimes(self.gpa, dest.rule, out.items.len);
             try dest.alphas.appendNTimes(self.gpa, dest.alpha, out.items.len);
+            // The stroke inherits the centreline's colour: `element` ran against
+            // the scratch buffer, so the colour lives there, not on `dest`.
+            try dest.colors.appendNTimes(self.gpa, stroke_color orelse scratch.color, out.items.len);
             try dest.subpaths.append(self.gpa, base);
         }
     }
@@ -427,6 +448,10 @@ pub const Scanner = struct {
             }
         }
         self.absorbPaint(at);
+        // Stamp after absorbPaint: that call is what reads THIS element's own
+        // `fill=` / `style="fill:..."`, so stamping before it would only ever
+        // see the parent's colour.
+        self.pb.color = self.inherited_fill orelse self.pb.color;
 
         // fill / stroke intent
         const fill_attr = at.get("fill");
@@ -440,7 +465,13 @@ pub const Scanner = struct {
         const style_fill_none = if (style_attr) |s| std.mem.indexOf(u8, s, "fill:none") != null else false;
         self.pending_stroke = null;
         var stroke_opts: ?stroke.Options = null;
-        if (at.get("stroke")) |s| {
+        // Editors (Inkscape, Illustrator) write every presentation property into
+        // style="", never as a bare attribute. Reading only `stroke` here is
+        // what dropped the daisy's petals: fill:none said "no fill" and the
+        // stroke was invisible to this block, so the element looked empty and
+        // was discarded.
+        const stroke_src = at.get("stroke") orelse (if (style_attr) |st| styleProp(st, "stroke") else null);
+        if (stroke_src) |s| {
             if (!std.mem.eql(u8, s, "none") and !std.mem.eql(u8, s, "transparent")) {
                 self.rep.stroked += 1;
                 // Start from the inherited stroke state and let this element's
@@ -451,13 +482,17 @@ pub const Scanner = struct {
                 // the ends came out square -- which reads as a point or a horn
                 // at the end of every open subpath.
                 var so = if (self.inherited_stroke) |inh| inh.opts else stroke.Options{};
-                if (at.get("stroke-width")) |w| {
+                const sw = at.get("stroke-width") orelse (if (style_attr) |st| styleProp(st, "stroke-width") else null);
+                if (sw) |w| {
                     var wi: usize = 0;
                     so.width = scanNum(w, &wi) orelse so.width;
                 }
-                if (at.get("stroke-linejoin")) |v| so.join = joinFrom(v);
-                if (at.get("stroke-linecap")) |v| so.cap = capFrom(v);
-                if (at.get("stroke-miterlimit")) |v| {
+                const slj = at.get("stroke-linejoin") orelse (if (style_attr) |st| styleProp(st, "stroke-linejoin") else null);
+                if (slj) |v| so.join = joinFrom(v);
+                const slc = at.get("stroke-linecap") orelse (if (style_attr) |st| styleProp(st, "stroke-linecap") else null);
+                if (slc) |v| so.cap = capFrom(v);
+                const sml = at.get("stroke-miterlimit") orelse (if (style_attr) |st| styleProp(st, "stroke-miterlimit") else null);
+                if (sml) |v| {
                     var mi: usize = 0;
                     so.miter_limit = scanNum(v, &mi) orelse so.miter_limit;
                 }
@@ -557,7 +592,26 @@ pub const Scanner = struct {
     fn absorbPaint(self: *Scanner, at: *const Attrs) void {
         if (at.get("fill")) |f| {
             self.inherited_no_fill = std.mem.eql(u8, f, "none");
+            if (!self.inherited_no_fill) {
+                if (std.mem.startsWith(u8, f, "url(")) {
+                    // Paint servers are a separate layer; record rather than
+                    // silently painting the previous colour.
+                    self.rep.add(self.gpa, "fill url(...) paint server not supported");
+                } else if (parseColor(f)) |c| {
+                    self.inherited_fill = c;
+                }
+            }
         } else if (at.get("style")) |st| {
+            if (styleFill(st)) |sv| {
+                self.inherited_no_fill = std.mem.eql(u8, sv, "none");
+                if (!self.inherited_no_fill) {
+                    if (std.mem.startsWith(u8, sv, "url(")) {
+                        self.rep.add(self.gpa, "fill url(...) paint server not supported");
+                    } else if (parseColor(sv)) |c| {
+                        self.inherited_fill = c;
+                    }
+                }
+            }
             if (std.mem.indexOf(u8, st, "fill:none") != null or
                 std.mem.indexOf(u8, st, "fill: none") != null) self.inherited_no_fill = true;
         }
@@ -575,13 +629,17 @@ pub const Scanner = struct {
                 if (scanNum(st, &oi)) |v| self.inherited_opacity = std.math.clamp(v, 0, 1);
             }
         }
-        const s = at.get("stroke") orelse return;
-        if (std.mem.eql(u8, s, "none") or std.mem.eql(u8, s, "transparent")) {
+        // Editors put every presentation property in style="", so an early
+        // return on the bare attribute alone dropped the stroke colour (and
+        // the whole inherited stroke state) for every Inkscape file.
+        const stroke_val = at.get("stroke") orelse (if (at.get("style")) |st| styleProp(st, "stroke") else null) orelse return;
+        if (std.mem.eql(u8, stroke_val, "none") or std.mem.eql(u8, stroke_val, "transparent")) {
             self.inherited_stroke = null;
             return;
         }
         var cur = self.inherited_stroke orelse StrokeState{};
         cur.present = true;
+        if (parseColor(stroke_val)) |c| cur.color = c;
         if (at.get("stroke-width")) |w| {
             var wi: usize = 0;
             cur.opts.width = scanNum(w, &wi) orelse cur.opts.width;
@@ -605,6 +663,94 @@ pub const Scanner = struct {
             }
         }
         self.inherited_stroke = cur;
+    }
+
+    /// Reads one property out of a `style=""` declaration list. Matches the
+    /// property name exactly and requires the colon, so `stroke` does not
+    /// match inside `stroke-width`.
+    pub fn styleProp(st: []const u8, prop: []const u8) ?[]const u8 {
+        var i: usize = 0;
+        while (i < st.len) {
+            while (i < st.len and (st[i] == ' ' or st[i] == ';' or st[i] == '\t')) i += 1;
+            const ns = i;
+            while (i < st.len and st[i] != ':' and st[i] != ';') i += 1;
+            const name = std.mem.trim(u8, st[ns..i], " \t");
+            if (i >= st.len or st[i] != ':') {
+                while (i < st.len and st[i] != ';') i += 1;
+                continue;
+            }
+            i += 1;
+            while (i < st.len and (st[i] == ' ' or st[i] == '\t')) i += 1;
+            const vs = i;
+            while (i < st.len and st[i] != ';') i += 1;
+            const val = std.mem.trim(u8, st[vs..i], " \t\r\n");
+            if (std.mem.eql(u8, name, prop)) return if (val.len == 0) null else val;
+        }
+        return null;
+    }
+
+    /// Extracts the `fill:` value out of a `style=""` declaration list.
+    pub fn styleFill(st: []const u8) ?[]const u8 {
+        const idx = std.mem.indexOf(u8, st, "fill:") orelse return null;
+        var i = idx + 5;
+        while (i < st.len and (st[i] == ' ' or st[i] == '\t')) i += 1;
+        const start = i;
+        while (i < st.len and st[i] != ';') i += 1;
+        const v = std.mem.trim(u8, st[start..i], " \t\r\n");
+        return if (v.len == 0) null else v;
+    }
+
+    /// Parses the colour forms that actually occur in icon sets: `#rgb`,
+    /// `#rrggbb`, `rgb()`/`rgba()`, and the handful of CSS keywords. Anything
+    /// else returns null so the caller keeps the inherited colour rather than
+    /// painting black over it.
+    pub fn parseColor(v: []const u8) ?[3]u8 {
+        const t = std.mem.trim(u8, v, " \t\r\n");
+        if (t.len == 0) return null;
+        if (t[0] == '#') return hexColor(t[1..]);
+        if (std.mem.startsWith(u8, t, "rgb")) {
+            const o = std.mem.indexOfScalar(u8, t, '(') orelse return null;
+            const cl = std.mem.indexOfScalarPos(u8, t, o, ')') orelse return null;
+            var it = std.mem.tokenizeAny(u8, t[o + 1 .. cl], ", \t");
+            var out: [3]u8 = .{ 0, 0, 0 };
+            var n: usize = 0;
+            while (it.next()) |tok| : (n += 1) {
+                if (n >= 3) break;
+                var ci: usize = 0;
+                const f = scanNum(tok, &ci) orelse return null;
+                out[n] = @intFromFloat(std.math.clamp(f, 0, 255));
+            }
+            return if (n >= 3) out else null;
+        }
+        const kw = .{
+            .{ "black", [3]u8{ 0, 0, 0 } },      .{ "white", [3]u8{ 255, 255, 255 } },
+            .{ "red", [3]u8{ 255, 0, 0 } },      .{ "green", [3]u8{ 0, 128, 0 } },
+            .{ "blue", [3]u8{ 0, 0, 255 } },     .{ "yellow", [3]u8{ 255, 255, 0 } },
+            .{ "gray", [3]u8{ 128, 128, 128 } }, .{ "grey", [3]u8{ 128, 128, 128 } },
+            .{ "transparent", [3]u8{ 0, 0, 0 } },
+        };
+        inline for (kw) |e| {
+            if (std.mem.eql(u8, t, e[0])) return e[1];
+        }
+        return null;
+    }
+
+    fn hexColor(d: []const u8) ?[3]u8 {
+        if (d.len != 3 and d.len != 6) return null;
+        var out: [3]u8 = .{ 0, 0, 0 };
+        if (d.len == 3) {
+            for (0..3) |k| {
+                const n = std.fmt.charToDigit(d[k], 16) catch return null;
+                out[k] = @intCast(n * 17);
+            }
+        } else {
+            for (0..3) |k| {
+                const hi = std.fmt.charToDigit(d[k * 2], 16) catch return null;
+                const lo = std.fmt.charToDigit(d[k * 2 + 1], 16) catch return null;
+                out[k] = @intCast(hi * 16 + lo);
+            }
+        }
+        return out;
     }
 
     fn joinFrom(v: ?[]const u8) stroke.Join {

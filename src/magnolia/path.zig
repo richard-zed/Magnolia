@@ -20,11 +20,16 @@ pub const PathBuf = struct {
     /// property and elements interleave into one list, so the rule has to
     /// travel with each edge rather than with the list.
     rules: std.ArrayList(FillRule) = .empty,
+    /// Parallel to `edges`; see `Icon.colors`.
+    colors: std.ArrayList(?[3]u8) = .empty,
     /// Parallel to `edges`; see `Icon.alphas`.
     alphas: std.ArrayList(f32) = .empty,
     /// Opacity stamped onto every edge emitted from now on. Set per element
     /// before its geometry is dispatched.
     alpha: f32 = 1,
+    /// Fill colour stamped onto every edge, same lifetime as `alpha`. Null
+    /// means the element declared no colour and the renderer's default stands.
+    color: ?[3]u8 = null,
     /// Rule applied to edges appended from now on.
     rule: FillRule = .nonzero,
     /// Index into `edges` where each subpath begins. A stroker needs this to
@@ -40,13 +45,14 @@ pub const PathBuf = struct {
     m: Mat = .{},
     cur: geom.Pt = .{ .x = 0, .y = 0 },
 
-    /// Frees the three parallel lists. `parseIcon` transfers ownership of
+    /// Frees the parallel edge lists. `parseIcon` transfers ownership of
     /// `edges`/`rules`/`subpaths` to the Icon and deinits nothing, so this is
     /// only for scratch buffers.
     pub fn deinit(pb: *PathBuf) void {
         pb.edges.deinit(pb.gpa);
         pb.rules.deinit(pb.gpa);
         pb.alphas.deinit(pb.gpa);
+        pb.colors.deinit(pb.gpa);
         pb.subpaths.deinit(pb.gpa);
     }
 
@@ -62,6 +68,7 @@ pub const PathBuf = struct {
         try pb.edges.append(pb.gpa, .{ .a = pb.m.apply(pb.cur), .b = pb.m.apply(p) });
         try pb.rules.append(pb.gpa, pb.rule);
         try pb.alphas.append(pb.gpa, pb.alpha);
+        try pb.colors.append(pb.gpa, pb.color);
         pb.cur = p;
     }
     pub fn cubic(pb: *PathBuf, c1: geom.Pt, c2: geom.Pt, p: geom.Pt) !void {

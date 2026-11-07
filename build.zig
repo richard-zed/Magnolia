@@ -4,6 +4,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const sakura_dep = b.dependency("sakura", .{ .target = target, .optimize = optimize });
+    const sakura = sakura_dep.module("sakura");
+
     const mod = b.addModule("magnolia", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -41,6 +44,20 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(oracle);
+
+    // Pixel verification goes through Sakura, an independent decoder. Checking
+    // our output with a decoder written the same session as the encoder proves
+    // nothing.
+    const decode = b.addExecutable(.{
+        .name = "decode",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/decode.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "sakura", .module = sakura }},
+        }),
+    });
+    b.installArtifact(decode);
 
     const run_sheet = b.addRunArtifact(sheet);
     run_sheet.step.dependOn(b.getInstallStep());

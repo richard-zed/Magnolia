@@ -40,6 +40,10 @@ pub const Icon = struct {
     /// edge; a document mixing `opacity="0.3"` on one path and nothing on the
     /// next cannot be described by one icon-wide number.
     alphas: std.ArrayList(f32) = .empty,
+    /// Parallel to `edges`. Fill colour per edge, null when the source named
+    /// none. Per edge for the same reason as `rules`: one document mixes
+    /// coloured shapes freely.
+    colors: std.ArrayList(?[3]u8) = .empty,
     /// Indices into `edges` where each closed subpath starts. Flat for the
     /// fill path; a stroker needs it to avoid welding contours together.
     subpaths: std.ArrayList(usize) = .empty,
@@ -62,13 +66,24 @@ pub const Icon = struct {
         while (i < self.edges.items.len) : (i += 1) {
             const rule: raster.FillRule = if (i < self.rules.items.len) self.rules.items[i] else .nonzero;
             const alpha: f32 = if (i < self.alphas.items.len) self.alphas.items[i] else 1;
+            const ecl: ?[3]u8 = if (i < self.colors.items.len) self.colors.items[i] else null;
             var j = i;
             while (j < self.edges.items.len) : (j += 1) {
                 const rj: raster.FillRule = if (j < self.rules.items.len) self.rules.items[j] else .nonzero;
                 const aj: f32 = if (j < self.alphas.items.len) self.alphas.items[j] else 1;
+                const cj: ?[3]u8 = if (j < self.colors.items.len) self.colors.items[j] else null;
                 if (rj != rule or aj != alpha) break;
+                // Null and explicit colour are both "same group" when neither
+                // side names one; compare the optionals directly so a run of
+                // uncoloured edges still batches.
+                if ((cj == null) != (ecl == null)) break;
+                if (cj != null and ecl != null) {
+                    const cv: [3]u8 = cj.?;
+                    const ev: [3]u8 = ecl.?;
+                    if (!std.mem.eql(u8, &cv, &ev)) break;
+                }
             }
-            r.fillRuleAlpha(self.edges.items[i..j], col, rule, alpha);
+            r.fillRuleAlpha(self.edges.items[i..j], ecl orelse col, rule, alpha);
             i = j - 1;
         }
     }
@@ -77,6 +92,7 @@ pub const Icon = struct {
         self.edges.deinit(gpa);
         self.rules.deinit(gpa);
         self.alphas.deinit(gpa);
+        self.colors.deinit(gpa);
         self.subpaths.deinit(gpa);
         self.report.deinit(gpa);
         self.* = .{};
@@ -104,10 +120,11 @@ fn parseIconInner(gpa: std.mem.Allocator, bytes: []const u8, tx: ?f32, ty: ?f32)
     var sc = Scanner{ .gpa = gpa, .pb = &pb, .rep = &rep, .tx = tx, .ty = ty };
     errdefer pb.rules.deinit(gpa);
     errdefer pb.alphas.deinit(gpa);
+    errdefer pb.colors.deinit(gpa);
     errdefer pb.subpaths.deinit(gpa);
     try sc.run(bytes);
 
-    return .{ .edges = pb.edges, .rules = pb.rules, .alphas = pb.alphas, .subpaths = pb.subpaths, .view = sc.view, .report = rep };
+    return .{ .edges = pb.edges, .rules = pb.rules, .alphas = pb.alphas, .colors = pb.colors, .subpaths = pb.subpaths, .view = sc.view, .report = rep };
 }
 
 test {
