@@ -352,3 +352,162 @@ test "zero stroke width draws nothing" {
     defer t.allocator.free(r.px);
     try t.expectEqual(@as(usize, 0), r.icon.edges.items.len);
 }
+
+// ------------------------------------------------------------------- colour
+// Colour was absent from the data model entirely: `fill` was reduced to a
+// none/not-none flag and `stroke` tracked geometry but never paint, so every
+// shape rendered in one caller-supplied colour regardless of the source.
+// These tests exist because that was invisible for as long as no coloured
+// fixture was ever rendered.
+
+test "a hex fill is parsed and travels per edge" {
+    const svg = "<svg viewBox=\"0 0 10 10\"><path fill=\"#e8e833\" d=\"M0 0 L10 0 L10 10 Z\"/></svg>";
+    var icon = try mag.parseIconSized(t.allocator, svg, 10, 10);
+    defer icon.deinit(t.allocator);
+    try t.expect(icon.colors.items.len == icon.edges.items.len);
+    for (icon.colors.items) |c| {
+        try t.expect(c != null);
+        try t.expectEqual(@as(u8, 0xe8), c.?[0]);
+        try t.expectEqual(@as(u8, 0xe8), c.?[1]);
+        try t.expectEqual(@as(u8, 0x33), c.?[2]);
+    }
+}
+
+test "fill in style= is read, not only the bare attribute" {
+    // Editors write every presentation property into style="". Reading only
+    // the attribute form silently painted these shapes in the default colour.
+    const svg = "<svg viewBox=\"0 0 10 10\"><path style=\"fill:#e8e833\" d=\"M0 0 L10 0 L10 10 Z\"/></svg>";
+    var icon = try mag.parseIconSized(t.allocator, svg, 10, 10);
+    defer icon.deinit(t.allocator);
+    try t.expect(icon.colors.items.len > 0);
+    try t.expectEqual(@as(u8, 0x33), icon.colors.items[0].?[2]);
+}
+
+test "a fill url() is reported rather than painted flat" {
+    const svg = "<svg viewBox=\"0 0 10 10\"><circle style=\"fill:url(#g)\" cx=\"5\" cy=\"5\" r=\"4\"/></svg>";
+    var icon = try mag.parseIconSized(t.allocator, svg, 10, 10);
+    defer icon.deinit(t.allocator);
+    var found = false;
+    for (icon.report.unsupported.items) |u| {
+        if (std.mem.indexOf(u8, u, "paint server") != null) found = true;
+    }
+    try t.expect(found);
+}
+
+test "colour inherits through a group" {
+    const svg = "<svg viewBox=\"0 0 20 20\"><g fill=\"#ff0000\"><path d=\"M0 0 L5 0 L5 5 Z\"/></g><path fill=\"#0000ff\" d=\"M10 10 L15 10 L15 15 Z\"/></svg>";
+    var icon = try mag.parseIconSized(t.allocator, svg, 20, 20);
+    defer icon.deinit(t.allocator);
+    var saw_red = false;
+    var saw_blue = false;
+    for (icon.colors.items) |c| {
+        if (c) |v| {
+            if (v[0] == 255 and v[1] == 0) saw_red = true;
+            if (v[2] == 255 and v[0] == 0) saw_blue = true;
+        }
+    }
+    try t.expect(saw_red);
+    try t.expect(saw_blue);
+}
+
+test "stroke colour is distinct from fill colour" {
+    // A stroked outline is painted with the stroke colour. Borrowing the fill
+    // colour painted the daisy's white petals in the petal-disc yellow.
+    const svg =
+        "<svg viewBox=\"0 0 20 20\"><path style=\"fill:none;stroke:#ffffff;stroke-width:2\" d=\"M2 10 L18 10\"/></svg>";
+    var icon = try mag.parseIconSized(t.allocator, svg, 20, 20);
+    defer icon.deinit(t.allocator);
+    try t.expect(icon.edges.items.len > 0);
+    for (icon.colors.items) |c| {
+        try t.expect(c != null);
+        try t.expectEqual(@as(u8, 255), c.?[0]);
+        try t.expectEqual(@as(u8, 255), c.?[1]);
+        try t.expectEqual(@as(u8, 255), c.?[2]);
+    }
+}
+
+test "a stroke declared in style= is not dropped" {
+    // fill:none plus a styled stroke looked like an empty element, so the
+    // element was discarded before emitting geometry -- the daisy's petals
+    // vanished entirely.
+    const svg =
+        "<svg viewBox=\"0 0 20 20\"><path style=\"fill:none;stroke:#ffffff;stroke-width:2\" d=\"M2 10 L18 10\"/></svg>";
+    var icon = try mag.parseIconSized(t.allocator, svg, 20, 20);
+    defer icon.deinit(t.allocator);
+    try t.expect(icon.edges.items.len > 0);
+}
+
+test "styleProp does not match a property inside a longer name" {
+    // `stroke` must not match the `stroke` inside `stroke-width`, which
+    // substring matching would do and then paint the stroke with a number.
+    const st = "fill:none;stroke-width:10.6;stroke:#ffffff";
+    try t.expectEqualStrings("#ffffff", mag.doc.Scanner.styleProp(st, "stroke").?);
+    try t.expectEqualStrings("10.6", mag.doc.Scanner.styleProp(st, "stroke-width").?);
+    try t.expect(mag.doc.Scanner.styleProp("stroke-width:4", "stroke") == null);
+}
+
+// --------------------------------------------------------------- round caps
+// The round cap once built its circle from `hw` centred at `from + dir*hw`.
+// That is only correct when the two cap endpoints are exactly 2*hw apart; in
+// general the offset sides meet the perpendicular nearer or further, so the
+// centre sat off the chord's midpoint, the arc missed `to`, and the gap was
+// closed with a straight chord across the end. On a real icon that chord
+// measured 64px and read as a shelf dropping out of the stroke.
+//
+// A count going the right way proves nothing here: the first attempted fix
+// closed the polyline, which moved the edge count in the correct direction
+// while destroying the stroke body. Hence geometry assertions below.
+
+test "a round cap closes on its own endpoint, with no chord across it" {
+    // Deliberately diagonal: the horizontal case puts the endpoints exactly
+    // 2*hw apart, which is the one geometry where the old bug was invisible.
+    const svg = strokeSvg("<path d=\"M8 8 L32 30\" fill=\"none\" stroke=\"#000\" stroke-width=\"4\" stroke-linecap=\"round\"/>");
+    var r = try renderStroke(t.allocator, svg);
+    defer r.icon.deinit(t.allocator);
+    defer t.allocator.free(r.px);
+    try t.expect(r.icon.report.stroked == 1);
+    try t.expect(r.icon.edges.items.len > 0);
+
+    // The cap is an ARC of radius hw centred on the line endpoint. The bug
+    // this guards put the centre at from+dir*hw instead of the midpoint
+    // between the two side endpoints, which threw the arc off by ~35 units and
+    // left a straight chord (the "shelf") across the end.
+    //
+    // Assert the property directly: every vertex of the far cap lies exactly
+    // hw from (32,30). A chord has vertices inside that circle; a correct arc
+    // has none.
+    const ex: f32 = 32; const ey: f32 = 30; const hw: f32 = 2;
+
+    var cap_verts: usize = 0;
+    var worst: f32 = 0;
+    for (r.icon.edges.items) |e| {
+        for ([_]mag.Pt{ e.a, e.b }) |p| {
+            // Only look at vertices in the cap neighbourhood, so body corners
+            // (which are legitimately at distance > hw) are excluded.
+            const dx = p.x - ex;
+            const dy = p.y - ey;
+            const d = @sqrt(dx * dx + dy * dy);
+            if (d > hw * 2.5) continue; // outside the cap disc entirely
+            cap_verts += 1;
+            worst = @max(worst, @abs(d - hw));
+        }
+    }
+
+    try t.expect(cap_verts > 8); // a real arc, not a stub
+    // Every cap vertex sits on the circle. Allow sub-0.1 slack for flattening.
+    try t.expect(worst < 0.1);
+}
+
+test "a round cap does not leak past the stroke body" {
+    // The visible symptom: with a diagonal stroke, the bad chord left ink
+    // below and to the right of where the cap should end.
+    const svg = strokeSvg("<path d=\"M8 8 L32 30\" fill=\"none\" stroke=\"#000\" stroke-width=\"4\" stroke-linecap=\"round\"/>");
+    var r = try renderStroke(t.allocator, svg);
+    defer r.icon.deinit(t.allocator);
+    defer t.allocator.free(r.px);
+    // Far corner is empty at every cap style.
+    try t.expectEqual(@as(u8, 0), alphaAt(r.px, 37, 37));
+    try t.expectEqual(@as(u8, 0), alphaAt(r.px, 2, 2));
+    // The body between the ends is inked.
+    try t.expect(alphaAt(r.px, 20, 19) > 150);
+}
