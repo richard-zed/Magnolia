@@ -426,7 +426,9 @@ pub const Scanner = struct {
         if (at.get("fill-rule")) |fr| {
             if (std.mem.eql(u8, fr, "evenodd")) self.rule = .evenodd else if (std.mem.eql(u8, fr, "nonzero")) self.rule = .nonzero;
         } else if (at.get("style")) |st| {
-            if (std.mem.indexOf(u8, st, "fill-rule:evenodd") != null or std.mem.indexOf(u8, st, "fill-rule: evenodd") != null) self.rule = .evenodd;
+            if (styleProp(st, "fill-rule")) |fr| {
+                if (std.mem.eql(u8, fr, "evenodd")) self.rule = .evenodd else if (std.mem.eql(u8, fr, "nonzero")) self.rule = .nonzero;
+            }
         }
         self.pb.rule = self.rule;
         // Opacity is per-element, NOT inherited like stroke and fill. A <g
@@ -441,10 +443,9 @@ pub const Scanner = struct {
             var oi: usize = 0;
             if (scanNum(o, &oi)) |v| self.pb.alpha = self.pb.alpha * std.math.clamp(v, 0, 1);
         } else if (at.get("style")) |st| {
-            if (std.mem.indexOf(u8, st, "opacity:")) |idx| {
-                var oi: usize = idx + 8;
-                while (oi < st.len and (st[oi] == ':' or st[oi] == ' ')) oi += 1;
-                if (scanNum(st, &oi)) |v| self.pb.alpha = self.pb.alpha * std.math.clamp(v, 0, 1);
+            if (styleProp(st, "opacity")) |ov| {
+                var oi: usize = 0;
+                if (scanNum(ov, &oi)) |v| self.pb.alpha = self.pb.alpha * std.math.clamp(v, 0, 1);
             }
         }
         self.absorbPaint(at);
@@ -457,12 +458,12 @@ pub const Scanner = struct {
         const fill_attr = at.get("fill");
         const style_attr = at.get("style");
         const fill_none = if (fill_attr) |f| std.mem.eql(u8, f, "none") else false;
-        const fill_opacity_zero = if (at.get("fill-opacity")) |o| (blk: {
+        const fill_opacity_zero = if (at.get("fill-opacity") orelse (if (style_attr) |s| styleProp(s, "fill-opacity") else null)) |o| (blk: {
             var i: usize = 0;
             const v = scanNum(o, &i) orelse break :blk false;
             break :blk v == 0;
         }) else false;
-        const style_fill_none = if (style_attr) |s| std.mem.indexOf(u8, s, "fill:none") != null else false;
+        const style_fill_none = if (style_attr) |s| (if (styleProp(s, "fill")) |fv| std.mem.eql(u8, fv, "none") else false) else false;
         self.pending_stroke = null;
         var stroke_opts: ?stroke.Options = null;
         // Editors (Inkscape, Illustrator) write every presentation property into
@@ -612,8 +613,9 @@ pub const Scanner = struct {
                     }
                 }
             }
-            if (std.mem.indexOf(u8, st, "fill:none") != null or
-                std.mem.indexOf(u8, st, "fill: none") != null) self.inherited_no_fill = true;
+            if (styleProp(st, "fill")) |fv| {
+                if (std.mem.eql(u8, fv, "none")) self.inherited_no_fill = true;
+            }
         }
         // Read opacity before any early return: an element can carry opacity
         // with no stroke attribute at all, and the old `orelse return` below
@@ -623,10 +625,9 @@ pub const Scanner = struct {
             if (scanNum(o, &oi)) |v| self.inherited_opacity = std.math.clamp(v, 0, 1);
         }
         if (at.get("style")) |st| {
-            if (std.mem.indexOf(u8, st, "opacity:")) |idx| {
-                var oi: usize = idx + 8;
-                while (oi < st.len and (st[oi] == ':' or st[oi] == ' ')) oi += 1;
-                if (scanNum(st, &oi)) |v| self.inherited_opacity = std.math.clamp(v, 0, 1);
+            if (styleProp(st, "opacity")) |ov| {
+                var oi: usize = 0;
+                if (scanNum(ov, &oi)) |v| self.inherited_opacity = std.math.clamp(v, 0, 1);
             }
         }
         // Editors put every presentation property in style="", so an early
@@ -656,10 +657,9 @@ pub const Scanner = struct {
         }
         // A stroke colour can also arrive through style="".
         if (at.get("style")) |st| {
-            if (std.mem.indexOf(u8, st, "stroke-width")) |idx| {
-                var wi: usize = idx + 13;
-                while (wi < st.len and (st[wi] == ':' or st[wi] == ' ')) wi += 1;
-                cur.opts.width = scanNum(st, &wi) orelse cur.opts.width;
+            if (styleProp(st, "stroke-width")) |sv| {
+                var wi: usize = 0;
+                cur.opts.width = scanNum(sv, &wi) orelse cur.opts.width;
             }
         }
         self.inherited_stroke = cur;
@@ -691,13 +691,7 @@ pub const Scanner = struct {
 
     /// Extracts the `fill:` value out of a `style=""` declaration list.
     pub fn styleFill(st: []const u8) ?[]const u8 {
-        const idx = std.mem.indexOf(u8, st, "fill:") orelse return null;
-        var i = idx + 5;
-        while (i < st.len and (st[i] == ' ' or st[i] == '\t')) i += 1;
-        const start = i;
-        while (i < st.len and st[i] != ';') i += 1;
-        const v = std.mem.trim(u8, st[start..i], " \t\r\n");
-        return if (v.len == 0) null else v;
+        return styleProp(st, "fill");
     }
 
     /// Parses the colour forms that actually occur in icon sets: `#rgb`,
