@@ -13,7 +13,8 @@ const stroke = @import("stroke.zig");
 const gradient = @import("gradient.zig");
 const defs = @import("defs.zig");
 const transform = @import("transform.zig");
-const PathBuf = @import("path.zig").PathBuf;
+const pathmod = @import("path.zig");
+const PathBuf = pathmod.PathBuf;
 
 /// Stroke presentation state as it inherits down the tree. Kept separate from
 /// `pending_stroke` (which is per-element) so a child that overrides only
@@ -129,6 +130,10 @@ pub const Scanner = struct {
     /// Stroke settings for the element currently being dispatched. Set by
     /// `element`, consumed by `dispatch` once its geometry exists.
     pending_stroke: ?stroke.Options = null,
+    /// A `stroke:url(#g)` whose gradient needs the element's bounding box.
+    /// Resolution happens in `dispatch`, after the geometry exists, and the
+    /// placed paint is written into `inherited_stroke` there.
+    pending_stroke_grad: ?pathmod.PendingGrad = null,
     /// Presentation attributes inherit down the tree, and icon sets put them
     /// on the root <svg> (fill="none" stroke="currentColor" stroke-width="2"
     /// stroke-linecap="round"). Without inheritance every icon in Feather,
@@ -141,6 +146,11 @@ pub const Scanner = struct {
     /// Paint servers (`url(#grad)`) cannot be resolved here, so they leave this
     /// null and land in the report instead.
     inherited_fill: ?[3]u8 = null,
+    /// The `color` property, which `currentColor` resolves against. It is an
+    /// ordinary inherited property, and icon sets almost universally paint
+    /// with `stroke="currentColor"` so a single `color` on the root recolours
+    /// the whole icon. Null means the caller's colour stands.
+    inherited_color: ?[3]u8 = null,
     /// Inherited `opacity` for the element currently being dispatched. Unlike
     /// stroke opacity this applies to fills too, so it lives beside the fill
     /// state rather than inside StrokeState.
@@ -184,6 +194,8 @@ pub const Scanner = struct {
         defer no_fill_stack.deinit(self.gpa);
         var fill_stack: std.ArrayList(?[3]u8) = .empty;
         defer fill_stack.deinit(self.gpa);
+        var color_stack: std.ArrayList(?[3]u8) = .empty;
+        defer color_stack.deinit(self.gpa);
         var depth: usize = 0;
         var skip_depth: ?usize = null;
 
@@ -214,6 +226,7 @@ pub const Scanner = struct {
                 if (stroke_stack.pop()) |v| self.inherited_stroke = v;
                 if (no_fill_stack.pop()) |v| self.inherited_no_fill = v;
                 if (fill_stack.pop()) |v| self.inherited_fill = v;
+                if (color_stack.pop()) |v| self.inherited_color = v;
                 if (skip_depth) |sd| {
                     if (depth < sd) {
                         skip_depth = null;
@@ -279,6 +292,7 @@ pub const Scanner = struct {
                 try stroke_stack.append(self.gpa, self.inherited_stroke);
                 try no_fill_stack.append(self.gpa, self.inherited_no_fill);
                 try fill_stack.append(self.gpa, self.inherited_fill);
+                try color_stack.append(self.gpa, self.inherited_color);
                 ctm = eff;
                 depth += 1;
                 if (skip_depth == null and isSkipTag(name)) skip_depth = depth;
@@ -350,6 +364,28 @@ pub const Scanner = struct {
                 }
             }
             scratch.pending_grad = null;
+        }
+
+        // Place a stroke paint server that needed the element's box. Runs
+        // after the geometry exists and before `strokeScratch` reads
+        // `inherited_stroke.grad`, so the placed paint is what the outline
+        // gets. The box is the CENTRELINE's bounds: SVG resolves a stroke
+        // gradient against the shape it strokes, not the widened outline.
+        if (self.pending_stroke_grad) |pg| {
+            if (scratchBounds(scratch.edges.items)) |bx| {
+                const placed: ?gradient.Paint = switch (self.resolveGradient(pg.val, pg.eff, bx)) {
+                    .linear => |g| gradient.Paint{ .linear = g },
+                    .radial => |g| gradient.Paint{ .radial = g },
+                    .needs_box, .none => null,
+                };
+                if (placed) |g| {
+                    var cur = self.inherited_stroke orelse StrokeState{};
+                    cur.grad = g;
+                    cur.color = null;
+                    self.inherited_stroke = cur;
+                }
+            }
+            self.pending_stroke_grad = null;
         }
 
         // An element's own stroke wins; otherwise it inherits. A shape with
@@ -567,6 +603,7 @@ pub const Scanner = struct {
         if (fill_opacity_val < 1.0) self.pb.alpha = self.pb.alpha * fill_opacity_val;
         const style_fill_none = if (style_attr) |s| (if (styleProp(s, "fill")) |fv| std.mem.eql(u8, fv, "none") else false) else false;
         self.pending_stroke = null;
+        self.pending_stroke_grad = null;
         var stroke_opts: ?stroke.Options = null;
         // Editors (Inkscape, Illustrator) write every presentation property into
         // style="", never as a bare attribute. Reading only `stroke` here is
@@ -622,7 +659,13 @@ pub const Scanner = struct {
                         // to. A bounding-box gradient on a stroke would need
                         // the stroked outline's own box, which does not exist
                         // yet at this point.
-                        .needs_box => self.rep.add(self.gpa, "stroke objectBoundingBox not supported"),
+                        .needs_box => {
+                            // Needs the element's own box, which does not exist
+                            // yet. Deferred to `dispatch` rather than dropped:
+                            // reporting it as unsupported here is what made a
+                            // stroke gradient render as flat black.
+                            self.pending_stroke_grad = .{ .val = s, .eff = eff };
+                        },
                         .none => {},
                     }
                 }
@@ -651,13 +694,43 @@ pub const Scanner = struct {
             const w = at.num("width", 0);
             const h = at.num("height", 0);
             if (w <= 0 or h <= 0) return;
-            if (at.get("rx") != null or at.get("ry") != null) self.rep.add(self.gpa, "rect rx/ry ignored (square corners)");
+            // rx/ry: per SVG, one missing value takes the other's, both clamp
+            // to half the corresponding side, and the corners are quarter
+            // ELLIPSES (k=0.5523 is the circle approximation, so a non-square
+            // rx/ry is scaled per axis rather than drawn as a circle).
+            var rx = at.num("rx", 0);
+            var ry = at.num("ry", 0);
+            if (at.get("rx") == null and at.get("ry") == null) {
+                rx = 0;
+                ry = 0;
+            } else if (at.get("rx") == null) {
+                rx = ry;
+            } else if (at.get("ry") == null) {
+                ry = rx;
+            }
+            rx = std.math.clamp(rx, 0, w / 2);
+            ry = std.math.clamp(ry, 0, h / 2);
             self.setM(eff);
-            self.pb.moveTo(.{ .x = x, .y = y });
-            try self.pb.segTo(.{ .x = x + w, .y = y });
-            try self.pb.segTo(.{ .x = x + w, .y = y + h });
-            try self.pb.segTo(.{ .x = x, .y = y + h });
-            try self.pb.segTo(.{ .x = x, .y = y });
+            if (rx == 0 or ry == 0) {
+                self.pb.moveTo(.{ .x = x, .y = y });
+                try self.pb.segTo(.{ .x = x + w, .y = y });
+                try self.pb.segTo(.{ .x = x + w, .y = y + h });
+                try self.pb.segTo(.{ .x = x, .y = y + h });
+                try self.pb.segTo(.{ .x = x, .y = y });
+                self.rep.shapes += 1;
+                return;
+            }
+            const kx = 0.5522847498 * rx;
+            const ky = 0.5522847498 * ry;
+            self.pb.moveTo(.{ .x = x + rx, .y = y });
+            try self.pb.segTo(.{ .x = x + w - rx, .y = y });
+            try self.pb.cubic(.{ .x = x + w - rx + kx, .y = y }, .{ .x = x + w, .y = y + ry - ky }, .{ .x = x + w, .y = y + ry });
+            try self.pb.segTo(.{ .x = x + w, .y = y + h - ry });
+            try self.pb.cubic(.{ .x = x + w, .y = y + h - ry + ky }, .{ .x = x + w - rx + kx, .y = y + h }, .{ .x = x + w - rx, .y = y + h });
+            try self.pb.segTo(.{ .x = x + rx, .y = y + h });
+            try self.pb.cubic(.{ .x = x + rx - kx, .y = y + h }, .{ .x = x, .y = y + h - ry + ky }, .{ .x = x, .y = y + h - ry });
+            try self.pb.segTo(.{ .x = x, .y = y + ry });
+            try self.pb.cubic(.{ .x = x, .y = y + ry - ky }, .{ .x = x + rx - kx, .y = y }, .{ .x = x + rx, .y = y });
             self.rep.shapes += 1;
             return;
         }
@@ -909,6 +982,16 @@ pub const Scanner = struct {
     }
 
     fn absorbPaint(self: *Scanner, at: *const Attrs) void {
+        // `color` first: currentColor anywhere in this element resolves against
+        // it, and it is an ordinary inherited property, so a single colour on
+        // the root <svg> recolours the whole icon.
+        if (at.get("color")) |cv| {
+            if (parseColor(cv)) |c| self.inherited_color = c;
+        } else if (at.get("style")) |st| {
+            if (styleProp(st, "color")) |cv| {
+                if (parseColor(cv)) |c| self.inherited_color = c;
+            }
+        }
         if (at.get("fill")) |f| {
             self.inherited_no_fill = std.mem.eql(u8, f, "none");
             if (!self.inherited_no_fill) {
@@ -918,7 +1001,7 @@ pub const Scanner = struct {
                     // the stamp site and reports only what it cannot resolve.
                     // Warning here too reported a failure for gradients that
                     // subsequently rendered perfectly.
-                } else if (parseColor(f)) |c| {
+                } else if (self.resolveColorValue(f)) |c| {
                     self.inherited_fill = c;
                 }
             }
@@ -928,7 +1011,7 @@ pub const Scanner = struct {
                 if (!self.inherited_no_fill) {
                     if (std.mem.startsWith(u8, sv, "url(")) {
                         // See the bare-attribute arm above.
-                    } else if (parseColor(sv)) |c| {
+                    } else if (self.resolveColorValue(sv)) |c| {
                         self.inherited_fill = c;
                     }
                 }
@@ -965,7 +1048,7 @@ pub const Scanner = struct {
             // no CTM, so it cannot place a gradient; the stroke_opts block in
             // `element` resolves it against `eff`. Warning here reported a
             // failure for gradients that then rendered correctly.
-        } else if (parseColor(stroke_val)) |c| cur.color = c;
+        } else if (self.resolveColorValue(stroke_val)) |c| cur.color = c;
         if (at.get("stroke-width")) |w| {
             var wi: usize = 0;
             cur.opts.width = scanNum(w, &wi) orelse cur.opts.width;
@@ -1023,6 +1106,15 @@ pub const Scanner = struct {
     /// `#rrggbb`, `rgb()`/`rgba()`, and the handful of CSS keywords. Anything
     /// else returns null so the caller keeps the inherited colour rather than
     /// painting black over it.
+    /// A colour value, resolving `currentColor` against the inherited `color`
+    /// property. Every fill/stroke read goes through here so the keyword
+    /// cannot be forgotten in one arm and honoured in another.
+    fn resolveColorValue(self: *Scanner, v: []const u8) ?[3]u8 {
+        const t = std.mem.trim(u8, v, " \t\r\n");
+        if (std.ascii.eqlIgnoreCase(t, "currentColor")) return self.inherited_color;
+        return parseColor(t);
+    }
+
     pub fn parseColor(v: []const u8) ?[3]u8 {
         const t = std.mem.trim(u8, v, " \t\r\n");
         if (t.len == 0) return null;
