@@ -51,7 +51,7 @@ pub fn parse(s: []const u8) Mat {
         while (i < s.len and s[i] != '(') i += 1;
         if (i >= s.len) break;
         i += 1;
-        var args = [_]f32{0} ** 6;
+        var args: [6]f32 = @splat(0);
         var n: usize = 0;
         while (i < s.len and s[i] != ')') {
             skipSep(s, &i);

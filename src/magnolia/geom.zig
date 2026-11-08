@@ -16,7 +16,12 @@ pub const Box = struct {
 };
 
 pub const Mat = struct {
-    a: f32 = 1, b: f32 = 0, c: f32 = 0, d: f32 = 1, e: f32 = 0, f: f32 = 0,
+    a: f32 = 1,
+    b: f32 = 0,
+    c: f32 = 0,
+    d: f32 = 1,
+    e: f32 = 0,
+    f: f32 = 0,
     pub fn apply(m: Mat, p: Pt) Pt {
         return .{ .x = m.a * p.x + m.c * p.y + m.e, .y = m.b * p.x + m.d * p.y + m.f };
     }

@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  zig:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - zig: "0.16.0"
+            os: ubuntu-latest
+          - zig: "0.17.0"
+            os: ubuntu-latest
+          - zig: "0.16.0"
+            os: ubuntu-24.04-arm
+          - zig: "0.17.0"
+            os: ubuntu-24.04-arm
+          - zig: "0.16.0"
+            os: windows-latest
+          - zig: "0.17.0"
+            os: windows-latest
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ matrix.zig }}
+
+      - name: Format
+        run: zig fmt --check src build.zig
+
+      # The verdict is the "N/N tests passed" line. A warm cache can exit 0
+      # with an empty log, which is a no-op, not a pass -- so --summary all is
+      # the gate, not decoration.
+      - name: Test
+        run: zig build test --summary all

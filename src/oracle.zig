@@ -51,8 +51,12 @@ pub fn main(init: std.process.Init) !void {
     defer r.xs.deinit(gpa);
     var ng: usize = 0;
     var nc: usize = 0;
-    for (icon.gradients.items) |g| if (g != null) { ng += 1; };
-    for (icon.colors.items) |c| if (c != null) { nc += 1; };
+    for (icon.gradients.items) |g| if (g != null) {
+        ng += 1;
+    };
+    for (icon.colors.items) |c| if (c != null) {
+        nc += 1;
+    };
     std.debug.print("gradients={d} colors={d} total={d}\n", .{ ng, nc, icon.gradients.items.len });
     for (icon.gradients.items, 0..) |g, gi| {
         if (g) |gg| {

@@ -29,8 +29,6 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(sheet);
 
-
-
     // Oracle: render one SVG at a fixed size for pixel comparison against a
     // reference renderer. Kept because the only trustworthy check on this
     // rasteriser is a diff, not a visual opinion.
@@ -59,10 +57,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(decode);
 
-    const run_sheet = b.addRunArtifact(sheet);
-    run_sheet.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_sheet.addArgs(args);
-    b.step("sheet", "Render SVGs to a contact sheet").dependOn(&run_sheet.step);
+    // `zig build sheet <out.png> <cell> <file.svg>...` needs argv. 0.17 removed
+    // `Build.args` in favour of a run step that collects passthru arguments
+    // itself, so the two versions need different wiring and neither branch
+    // compiles on the other.
+    const sheet_step = b.step("sheet", "Render SVGs to a contact sheet");
+    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) {
+        const run_sheet = b.addRunArtifact(sheet);
+        run_sheet.addPassthruArgs();
+        sheet_step.dependOn(&run_sheet.step);
+    } else {
+        const run_sheet = b.addRunArtifact(sheet);
+        if (b.args) |args| run_sheet.addArgs(args);
+        sheet_step.dependOn(&run_sheet.step);
+    }
 
     // `zig build test` must also COMPILE every auxiliary binary. Three separate
     // times a stale field shape hid inside rc/oracle/decode while the suite

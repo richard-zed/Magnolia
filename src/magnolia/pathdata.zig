@@ -9,7 +9,7 @@ const scanNum = numbers.scanNum;
 const skipSep = numbers.skipSep;
 
 /// Counters filled while parsing, kept for diagnostics and tests.
-pub const DStats = struct { cmds: [16]u32 = [_]u32{0} ** 16, arc_count: usize = 0 };
+pub const DStats = struct { cmds: [16]u32 = @splat(0), arc_count: usize = 0 };
 
 /// Parses an SVG `d` attribute into `pb`. Implicit command repeats are
 /// handled (`M` continues as `L`).

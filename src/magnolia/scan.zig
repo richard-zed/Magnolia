@@ -490,7 +490,7 @@ pub const Scanner = struct {
         _ = selfclose;
         if (std.mem.eql(u8, name, "svg")) {
             if (at.get("viewBox")) |vb| {
-                var arr = [_]f32{0} ** 4;
+                var arr: [4]f32 = @splat(0);
                 var k: usize = 0;
                 var i: usize = 0;
                 while (k < 4) {
@@ -1134,10 +1134,10 @@ pub const Scanner = struct {
             return if (n >= 3) out else null;
         }
         const kw = .{
-            .{ "black", [3]u8{ 0, 0, 0 } },      .{ "white", [3]u8{ 255, 255, 255 } },
-            .{ "red", [3]u8{ 255, 0, 0 } },      .{ "green", [3]u8{ 0, 128, 0 } },
-            .{ "blue", [3]u8{ 0, 0, 255 } },     .{ "yellow", [3]u8{ 255, 255, 0 } },
-            .{ "gray", [3]u8{ 128, 128, 128 } }, .{ "grey", [3]u8{ 128, 128, 128 } },
+            .{ "black", [3]u8{ 0, 0, 0 } },       .{ "white", [3]u8{ 255, 255, 255 } },
+            .{ "red", [3]u8{ 255, 0, 0 } },       .{ "green", [3]u8{ 0, 128, 0 } },
+            .{ "blue", [3]u8{ 0, 0, 255 } },      .{ "yellow", [3]u8{ 255, 255, 0 } },
+            .{ "gray", [3]u8{ 128, 128, 128 } },  .{ "grey", [3]u8{ 128, 128, 128 } },
             .{ "transparent", [3]u8{ 0, 0, 0 } },
         };
         inline for (kw) |e| {

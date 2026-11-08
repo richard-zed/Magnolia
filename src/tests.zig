@@ -521,7 +521,9 @@ test "a round cap closes on its own endpoint, with no chord across it" {
     // Assert the property directly: every vertex of the far cap lies exactly
     // hw from (32,30). A chord has vertices inside that circle; a correct arc
     // has none.
-    const ex: f32 = 32; const ey: f32 = 30; const hw: f32 = 2;
+    const ex: f32 = 32;
+    const ey: f32 = 30;
+    const hw: f32 = 2;
 
     var cap_verts: usize = 0;
     var worst: f32 = 0;
@@ -634,7 +636,9 @@ test "a resolvable gradient fills, and is not reported" {
     var icon = try mag.parseIconSized(t.allocator, gradSvg, 20, 20);
     defer icon.deinit(t.allocator);
     var n: usize = 0;
-    for (icon.gradients.items) |g| if (g != null) { n += 1; };
+    for (icon.gradients.items) |g| if (g != null) {
+        n += 1;
+    };
     try t.expect(n > 0);
     // Resolving it means there is nothing to complain about.
     for (icon.report.unsupported.items) |u| {
@@ -892,7 +896,6 @@ test "a gradient with no gradientTransform is unchanged" {
     try t.expectApproxEqAbs(@as(f32, 0), g.y1, 0.01);
 }
 
-
 // ------------------------------------------------------------ blind-spot fixture
 // <line> and currentColor were both broken while the suite was green: every
 // other test draws a <rect> or a <path>, and neither fixture icon uses either
@@ -951,7 +954,6 @@ test "currentColor takes the caller colour, not black" {
     try t.expectEqual(@as(u8, 90), px[o + 2]);
 }
 
-
 test "a gradient with no gradientUnits attribute uses the SVG default" {
     // gradientUnits is optional and defaults to objectBoundingBox. An SVG that
     // simply omits it is valid and box-relative; refusing it painted the shape
@@ -981,7 +983,6 @@ test "a gradient with no gradientUnits attribute uses the SVG default" {
     // And it must not be reported as unsupported.
     try t.expect(!reportsContains(&icon, "objectBoundingBox"));
 }
-
 
 // ------------------------------------------------------------------- radials
 test "a radial gradient is concentric and centred" {
@@ -1058,7 +1059,6 @@ test "a radial under the default unit is sized by the element box" {
     try t.expectApproxEqAbs(@as(f32, 5), rad.ry, 0.01);
 }
 
-
 test "a white stop fading to transparent ends dark over a black background" {
     // Straight RGB interpolation between white-alpha-1 and white-alpha-0 is
     // white everywhere: both endpoints have identical RGB, so the colour never
@@ -1095,7 +1095,6 @@ test "a white stop fading to transparent ends dark over a black background" {
     try t.expect(near > mid);
     try t.expect(mid > far);
 }
-
 
 test "two stops with different alpha interpolate unpremultiplied, like rsvg" {
     // The case where premultiplied and straight interpolation disagree: both
