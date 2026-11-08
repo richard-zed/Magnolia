@@ -630,18 +630,52 @@ test "an href chain borrows the referenced gradient's stops" {
     try t.expect(found);
 }
 
-test "objectBoundingBox is reported rather than guessed at" {
-    // The SVG default, and unresolvable without the element bbox. Painting it
-    // as if it were userSpaceOnUse would look plausible and be wrong.
+test "objectBoundingBox maps fractions of the element box" {
+    // The SVG default unit, and the case that used to be refused outright.
+    // x1/x2 here are 0 and 1 -- FRACTIONS, not user units -- and with no
+    // gradientUnits attribute at all, so this is also the "tool omitted the
+    // attribute" case that every real exporter produces.
+    //
+    // A rect at x=5 w=10 puts the axis at user-space x 5..15. If the
+    // fractions were misread as user units the axis would be 0..1 and the
+    // whole rect would land past the last stop, painting one flat colour.
     const svg =
-        "<svg viewBox=\"0 0 20 20\">" ++
-        "<defs><linearGradient id=\"g\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\">" ++
-        "<stop offset=\"0\" style=\"stop-color:#000000\"/></linearGradient></defs>" ++
-        "<rect x=\"0\" y=\"0\" width=\"20\" height=\"20\" style=\"fill:url(#g);stroke:none\"/>" ++
-        "</svg>";
+        \\<svg viewBox="0 0 20 20">
+        \\  <defs>
+        \\    <linearGradient id="g" x1="0" y1="0" x2="1" y2="0">
+        \\      <stop offset="0" stop-color="#ff0000"/>
+        \\      <stop offset="1" stop-color="#0000ff"/>
+        \\    </linearGradient>
+        \\  </defs>
+        \\  <rect x="5" y="5" width="10" height="10" fill="url(#g)"/>
+        \\</svg>
+    ;
     var icon = try mag.parseIconSized(t.allocator, svg, 20, 20);
     defer icon.deinit(t.allocator);
-    try t.expect(reportsContains(&icon, "objectBoundingBox"));
+
+    // Placed gradient: axis must be the rect's box, not the viewBox.
+    var g: ?mag.gradient.Linear = null;
+    for (icon.gradients.items) |it| if (it) |gg| {
+        g = gg;
+        break;
+    };
+    const lin = g orelse return error.NoGradient;
+    try t.expectApproxEqAbs(@as(f32, 5), lin.x0, 0.01);
+    try t.expectApproxEqAbs(@as(f32, 15), lin.x1, 0.01);
+
+    // And it actually sweeps: red near the left edge of the rect, blue near
+    // the right. An inert gradient reads one colour at both samples.
+    var px: [20 * 20 * 4]u8 = undefined;
+    @memset(&px, 0);
+    var acc: [20]f32 = undefined;
+    var r = mag.Raster{ .gpa = t.allocator, .w = 20, .h = 20, .px = &px, .acc = &acc };
+    defer r.xs.deinit(t.allocator);
+    icon.draw(&r, .{ 0, 0, 0 });
+
+    const left = (10 * 20 + 6) * 4;
+    const right = (10 * 20 + 14) * 4;
+    try t.expect(px[left] > 180 and px[left + 2] < 80);
+    try t.expect(px[right + 2] > 180 and px[right] < 80);
 }
 
 test "a gradient sweeps across the shape rather than painting one colour" {

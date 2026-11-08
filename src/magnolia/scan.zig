@@ -37,6 +37,14 @@ const StrokeState = struct {
 const DStats = pathdata.DStats;
 
 const Mat = geom.Mat;
+
+/// Outcome of placing a paint server.
+const GradResult = union(enum) {
+    none,
+    /// Needs the element's bounding box; resolve once the element is closed.
+    needs_box,
+    linear: gradient.Linear,
+};
 const Pt = geom.Pt;
 const scanNum = numbers.scanNum;
 const skipSep = numbers.skipSep;
@@ -313,6 +321,34 @@ pub const Scanner = struct {
 
         if (scratch.edges.items.len == 0) return;
 
+        // The element is complete, so its bounding box exists. Finish any
+        // paint server that needed it. Done before the geometry is transferred
+        // so both branches below see a placed gradient, and so the release
+        // path (a stroke replaces the centreline) does not inherit a request
+        // that referred to edges which no longer exist.
+        if (scratch.pending_grad) |pg| {
+            if (scratchBounds(scratch.edges.items)) |bx| {
+                switch (self.resolveGradient(pg.val, pg.eff, bx)) {
+                    .linear => |g| {
+                        scratch.grad = g;
+                        scratch.color = null;
+                        // The per-edge arrays were written DURING the element,
+                        // while the paint was still deferred, so they hold the
+                        // null of a failed attempt. The transfer prefers the
+                        // per-edge entry over `scratch.grad`, so without this
+                        // the resolved gradient is correct and never copied.
+                        for (scratch.gradients.items) |*slot| slot.* = g;
+                        for (scratch.colors.items) |*slot| slot.* = null;
+                    },
+                    // Still nothing: the definition is genuinely missing. The
+                    // element keeps whatever flat colour it inherited, which
+                    // is what an unplaceable paint server degrades to.
+                    .needs_box, .none => {},
+                }
+            }
+            scratch.pending_grad = null;
+        }
+
         // An element's own stroke wins; otherwise it inherits. A shape with
         // no stroke of its own inside a stroked root is still stroked.
         const opts = self.pending_stroke orelse (if (self.inherited_stroke) |s|
@@ -496,10 +532,14 @@ pub const Scanner = struct {
         // see the parent's colour.
         self.pb.color = self.inherited_fill orelse self.pb.color;
         self.pb.grad = null;
-        if (at.get("fill")) |f| self.pb.grad = self.resolveGradient(f, eff);
-        if (self.pb.grad == null) {
+        self.pb.pending_grad = null;
+        // A bounding-box gradient cannot be placed until the element's
+        // geometry is complete, so the request is carried forward rather than
+        // resolved here. `dispatch` finishes it against the closed outline.
+        if (at.get("fill")) |f| self.applyGrad(f, eff);
+        if (self.pb.grad == null and self.pb.pending_grad == null) {
             if (at.get("style")) |st| {
-                if (styleFill(st)) |sv| self.pb.grad = self.resolveGradient(sv, eff);
+                if (styleFill(st)) |sv| self.applyGrad(sv, eff);
             }
         }
         // A gradient overrides the flat colour it would otherwise have
@@ -561,11 +601,20 @@ pub const Scanner = struct {
                 // this a `stroke:url(#g)` had no colour at all and the
                 // stroked outline fell through to the draw default: black.
                 if (std.mem.startsWith(u8, s, "url(")) {
-                    if (self.resolveGradient(s, eff)) |g| {
-                        var cur = self.inherited_stroke orelse StrokeState{};
-                        cur.grad = g;
-                        cur.color = null;
-                        self.inherited_stroke = cur;
+                    switch (self.resolveGradient(s, eff, null)) {
+                        .linear => |g| {
+                            var cur = self.inherited_stroke orelse StrokeState{};
+                            cur.grad = g;
+                            cur.color = null;
+                            self.inherited_stroke = cur;
+                        },
+                        // Stroke paint servers are placed here, where the CTM
+                        // is in scope, and there is no element box to defer
+                        // to. A bounding-box gradient on a stroke would need
+                        // the stroked outline's own box, which does not exist
+                        // yet at this point.
+                        .needs_box => self.rep.add(self.gpa, "stroke objectBoundingBox not supported"),
+                        .none => {},
                     }
                 }
                 stroke_opts = so;
@@ -673,20 +722,59 @@ pub const Scanner = struct {
     /// for everything else -- flat colours are handled by `parseColor`, and a
     /// reference to a paint server that is missing or uses
     /// objectBoundingBox is reported rather than approximated.
-    fn resolveGradient(self: *Scanner, val: []const u8, eff: Mat) ?gradient.Linear {
-        const id = defs.refId(val) orelse return null;
+    /// Places a paint server in device space.
+    ///
+    /// `box` is the element's bounding box in the SAME user space as `eff`.
+    /// It is required by `gradientUnits="objectBoundingBox"` (the SVG
+    /// default) and ignored by `userSpaceOnUse`.
+    ///
+    /// Returns `.needs_box` when the gradient needs a box and none was supplied.
+    /// That is the ordinary state of affairs while an element is still being
+    /// built: the dispatcher resolves it afterwards, once the geometry has
+    /// closed. Reporting "not supported" at this point would warn about every
+    /// bounding-box gradient before it had a chance to resolve.
+    /// Records a fill paint server on the current element: resolved now when
+    /// it can be, deferred when it needs the element's bounding box.
+    fn applyGrad(self: *Scanner, val: []const u8, eff: Mat) void {
+        switch (self.resolveGradient(val, eff, null)) {
+            .linear => |g| self.pb.grad = g,
+            .needs_box => self.pb.pending_grad = .{ .val = val, .eff = eff },
+            .none => {},
+        }
+    }
+
+    /// Union of the element's edge endpoints, in the same user space the
+    /// edges carry. Control points are not included, so a curve's hull can
+    /// exceed this box slightly; SVG defines objectBoundingBox on the
+    /// GEOMETRY bounding box, which for a path means the control points and
+    /// not the tightened outline. Using the endpoints is the closest cheap
+    /// approximation and matches how the shape actually fills.
+    fn scratchBounds(edges: []const geom.Edge) ?geom.Box {
+        if (edges.len == 0) return null;
+        var b = geom.Box{ .x0 = edges[0].a.x, .y0 = edges[0].a.y, .x1 = edges[0].a.x, .y1 = edges[0].a.y };
+        for (edges) |e| {
+            for ([_]geom.Pt{ e.a, e.b }) |p| {
+                if (p.x < b.x0) b.x0 = p.x;
+                if (p.y < b.y0) b.y0 = p.y;
+                if (p.x > b.x1) b.x1 = p.x;
+                if (p.y > b.y1) b.y1 = p.y;
+            }
+        }
+        return b;
+    }
+
+    fn resolveGradient(self: *Scanner, val: []const u8, eff: Mat, box: ?geom.Box) GradResult {
+        const id = defs.refId(val) orelse return .none;
         const set = self.defs_set orelse {
             self.rep.add(self.gpa, "fill url(...) paint server not found");
-            return null;
+            return .none;
         };
         const d = set.find(id) orelse {
             self.rep.add(self.gpa, "fill url(...) paint server not found");
-            return null;
+            return .none;
         };
-        if (!d.user_space) {
-            self.rep.add(self.gpa, "gradientUnits=objectBoundingBox not supported");
-            return null;
-        }
+        if (!d.user_space and box == null) return .needs_box;
+
         // xlink:href chains: a gradient with no stops of its own borrows them.
         var stops = d.stops.items;
         var hops: usize = 0;
@@ -698,16 +786,34 @@ pub const Scanner = struct {
         }
         if (stops.len == 0) {
             self.rep.add(self.gpa, "gradient has no stops");
-            return null;
+            return .none;
         }
-        var out_stops = self.gpa.alloc(gradient.Stop, stops.len) catch return null;
+        var out_stops = self.gpa.alloc(gradient.Stop, stops.len) catch return .none;
         self.grad_stops.append(self.gpa, out_stops) catch {
             self.gpa.free(out_stops);
-            return null;
+            return .none;
         };
         for (stops, 0..) |sdef, k| {
             out_stops[k] = .{ .offset = sdef.offset, .color = sdef.color, .opacity = sdef.opacity };
         }
+        // objectBoundingBox: x1/y1/x2/y2 are FRACTIONS of the element's box,
+        // defaulting to 0,0 -> 1,0 (a left-to-right sweep across the shape).
+        // Map the fraction into user space before anything else touches it.
+        // The defaults differ between the two unit systems, which is why the
+        // `orelse` values are inside this branch rather than shared.
+        const ax = if (box) |b| Blk: {
+            const x1 = d.x1 orelse 0;
+            const y1 = d.y1 orelse 0;
+            const x2 = d.x2 orelse 1;
+            const y2 = d.y2 orelse 0;
+            const w = b.x1 - b.x0;
+            const h = b.y1 - b.y0;
+            break :Blk .{
+                geom.Pt{ .x = b.x0 + x1 * w, .y = b.y0 + y1 * h },
+                geom.Pt{ .x = b.x0 + x2 * w, .y = b.y0 + y2 * h },
+            };
+        } else .{ geom.Pt{ .x = d.x1 orelse 0, .y = d.y1 orelse 0 }, geom.Pt{ .x = d.x2 orelse 1, .y = d.y2 orelse 0 } };
+
         // gradientTransform sits between the gradient's own coordinate frame
         // and user space, so it composes on the LEFT of the CTM: a point goes
         // gradient-local -> xform -> user space -> eff -> device. Applying it
@@ -718,11 +824,9 @@ pub const Scanner = struct {
         // Inherited through the href chain like the stops: a gradient with no
         // axis of its own takes both from the one it points at.
         const xf = d.xform orelse cur.xform orelse geom.Mat{};
-        const g0 = xf.apply(.{ .x = d.x1 orelse 0, .y = d.y1 orelse 0 });
-        const g1 = xf.apply(.{ .x = d.x2 orelse 1, .y = d.y2 orelse 0 });
-        const p0 = eff.apply(g0);
-        const p1 = eff.apply(g1);
-        return .{ .x0 = p0.x, .y0 = p0.y, .x1 = p1.x, .y1 = p1.y, .stops = out_stops };
+        const p0 = eff.apply(xf.apply(ax[0]));
+        const p1 = eff.apply(xf.apply(ax[1]));
+        return .{ .linear = .{ .x0 = p0.x, .y0 = p0.y, .x1 = p1.x, .y1 = p1.y, .stops = out_stops } };
     }
 
     fn absorbPaint(self: *Scanner, at: *const Attrs) void {

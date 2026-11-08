@@ -2,6 +2,19 @@
 pub const Pt = struct { x: f32, y: f32 };
 pub const Edge = struct { a: Pt, b: Pt };
 
+/// An axis-aligned box in user space. `x1/y1` is the far corner, not a width
+/// and height, so an empty box has `x1 < x0` and every consumer tests for it.
+pub const Box = struct {
+    x0: f32 = 0,
+    y0: f32 = 0,
+    x1: f32 = 0,
+    y1: f32 = 0,
+
+    pub fn isEmpty(b: Box) bool {
+        return b.x1 <= b.x0 or b.y1 <= b.y0;
+    }
+};
+
 pub const Mat = struct {
     a: f32 = 1, b: f32 = 0, c: f32 = 0, d: f32 = 1, e: f32 = 0, f: f32 = 0,
     pub fn apply(m: Mat, p: Pt) Pt {

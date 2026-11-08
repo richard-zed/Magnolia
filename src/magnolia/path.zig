@@ -14,6 +14,15 @@ const Pt = geom.Pt;
 const Edge = geom.Edge;
 const Mat = geom.Mat;
 
+/// An unresolved `objectBoundingBox` paint server.
+pub const PendingGrad = struct {
+    val: []const u8,
+    /// The element's own CTM, captured where it is in scope. The transfer
+    /// point no longer has `eff`, and recomputing it means re-walking the
+    /// transform stack.
+    eff: Mat,
+};
+
 pub const PathBuf = struct {
     gpa: std.mem.Allocator,
     edges: std.ArrayList(Edge) = .empty,
@@ -37,6 +46,15 @@ pub const PathBuf = struct {
     color: ?[3]u8 = null,
     /// Gradient fill stamped onto every edge, same lifetime as `color`.
     grad: ?gradient.Linear = null,
+    /// A paint server that could not be placed yet, because
+    /// `gradientUnits="objectBoundingBox"` needs the element's bounding box
+    /// and the box is not known until the element is finished. Carried to the
+    /// dispatcher, which resolves it against the completed geometry.
+    ///
+    /// This is a relocation of one call, not deferred painting: the resolution
+    /// still happens inside the same element's dispatch, so nothing has to be
+    /// remembered across elements.
+    pending_grad: ?PendingGrad = null,
     /// Rule applied to edges appended from now on.
     rule: FillRule = .nonzero,
     /// Index into `edges` where each subpath begins. A stroker needs this to
