@@ -808,41 +808,59 @@ pub const Scanner = struct {
         }
         const xf = d.xform orelse cur.xform orelse geom.Mat{};
 
-        // Radial: centre and radius in the gradient's own frame, mapped to
+        // Radial: centre and radii in the gradient's own frame, mapped to
         // user space through the element box when the unit is box-relative.
         //
-        // The box is NOT square, so a single `r` given as a fraction has to
-        // pick an axis. SVG says to use the box DIAGONAL divided by sqrt(2),
-        // which makes a circle fill the box exactly when the box is square and
-        // keeps it inside the box otherwise. Using width alone would overflow
-        // a tall element and using the smaller side would under-fill a wide
-        // one; the diagonal is the compromise the spec settled on.
+        // SVG resolves a box-relative radius inside a UNIT square and then
+        // stretches the result by the box. So r=0.5 on a 60x30 box is an
+        // ELLIPSE with rx=30, ry=15 -- not a circle. Verified against rsvg:
+        // an earlier diagonal rule (r*sqrt((w^2+h^2)/2)) rendered a circle and
+        // diverged by up to 85/255 in the mid-field while agreeing at the
+        // centre and one corner, which is exactly how a wrong-shape error
+        // hides.
         if (d.radial) {
+            // userSpaceOnUse: cx/cy/r are already USER units, so they go
+            // straight through `eff` with no box involvement. Treating them
+            // as box fractions put a centre of 0.4 units at the origin and
+            // collapsed the gradient to a flat colour.
+            if (d.user_space) {
+                const c = eff.apply(xf.apply(.{ .x = d.cx, .y = d.cy }));
+                const rx_p = eff.apply(xf.apply(.{ .x = d.cx + d.r, .y = d.cy }));
+                const ry_p = eff.apply(xf.apply(.{ .x = d.cx, .y = d.cy + d.r }));
+                return .{ .radial = .{
+                    .cx = c.x,
+                    .cy = c.y,
+                    .rx = @abs(rx_p.x - c.x),
+                    .ry = @abs(ry_p.y - c.y),
+                    .stops = out_stops,
+                } };
+            }
             const cw = if (box) |b| b.x1 - b.x0 else 1;
             const ch = if (box) |b| b.y1 - b.y0 else 1;
-            const scale = @sqrt((cw * cw + ch * ch) / 2.0);
             const ox: f32 = if (box) |b| b.x0 else 0;
             const oy: f32 = if (box) |b| b.y0 else 0;
 
             const cx_u = ox + d.cx * cw;
             const cy_u = oy + d.cy * ch;
-            // `r` is a fraction of the normalised diagonal, not of an axis.
-            const r_u = d.r * scale;
 
-            const c_dev = eff.apply(xf.apply(.{ .x = cx_u, .y = cy_u }));
-            // The transform can scale and rotate, so the radius has to be
-            // carried through it too. Transform the rim point rather than
-            // scaling r by a factor: a rotation alone would be wasted work
-            // otherwise, and a non-uniform scale has no single correct
-            // scalar anyway -- measuring the actual rim point is the closest
-            // honest answer, matching how stroke width is approximated.
-            const rim = eff.apply(xf.apply(.{ .x = cx_u + r_u, .y = cy_u }));
-            const dx = rim.x - c_dev.x;
-            const dy = rim.y - c_dev.y;
+            // The box arrives in DEVICE space (it is measured off the
+            // element's flattened edges), so the centre is already placed --
+            // applying `eff` again scaled it a second time and put a 0.4*30
+            // centre at y=42 in a 60px render. Only the gradient's own
+            // gradientTransform still needs folding in, and that is a
+            // translation/rotation in the gradient's frame, so it is applied
+            // as a delta about the centre rather than to the absolute point.
+            const xfo = xf.apply(.{ .x = 0, .y = 0 });
+            const xe = xf.apply(.{ .x = cw, .y = 0 });
+            const ye = xf.apply(.{ .x = 0, .y = ch });
+            const c_dev = geom.Pt{ .x = cx_u + xfo.x, .y = cy_u + xfo.y };
+            const rim_x = .{ .x = c_dev.x + (xe.x - xfo.x) * d.r, .y = c_dev.y + (xe.y - xfo.y) * d.r };
+            const rim_y = .{ .x = c_dev.x + (ye.x - xfo.x) * d.r, .y = c_dev.y + (ye.y - xfo.y) * d.r };
             return .{ .radial = .{
                 .cx = c_dev.x,
                 .cy = c_dev.y,
-                .r = @sqrt(dx * dx + dy * dy),
+                .rx = @abs(rim_x.x - c_dev.x),
+                .ry = @abs(rim_y.y - c_dev.y),
                 .stops = out_stops,
             } };
         }

@@ -116,7 +116,7 @@ pub const Icon = struct {
                         .radial => {
                             const gr = gv.radial;
                             const er = ev.radial;
-                            if (gr.cx != er.cx or gr.cy != er.cy or gr.r != er.r) break :outer;
+                            if (gr.cx != er.cx or gr.cy != er.cy or gr.rx != er.rx or gr.ry != er.ry) break :outer;
                         },
                     }
                 }

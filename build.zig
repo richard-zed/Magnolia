@@ -58,9 +58,28 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(decode);
+    const rc = b.addExecutable(.{
+        .name = "rc",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rc.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(rc);
 
     const run_sheet = b.addRunArtifact(sheet);
     run_sheet.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_sheet.addArgs(args);
     b.step("sheet", "Render SVGs to a contact sheet").dependOn(&run_sheet.step);
+
+    // `zig build test` must also COMPILE every auxiliary binary. Three separate
+    // times a stale field shape hid inside rc/oracle/decode while the suite
+    // stayed green, because the test step only builds the module and the test
+    // runner. A binary that does not compile is not a test failure unless the
+    // test step depends on it.
+    test_step.dependOn(&decode.step);
+    test_step.dependOn(&rc.step);
+    test_step.dependOn(&oracle.step);
+    test_step.dependOn(&sheet.step);
 }

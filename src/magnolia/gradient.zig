@@ -71,18 +71,23 @@ pub fn rampAt(stops: []const Stop, t: f32) [4]f32 {
 
 /// A radial gradient in device space.
 pub const Radial = struct {
-    /// Centre and radius, already through the CTM.
+    /// Centre, already through the CTM.
     cx: f32,
     cy: f32,
-    r: f32,
+    /// Radius per axis. Under objectBoundingBox the unit radius is a
+    /// fraction resolved in a UNIT square and then stretched by the box,
+    /// so an r=0.5 gradient on a 60x30 box is an ELLIPSE, not a circle.
+    /// Equal values (userSpaceOnUse) give a circle.
+    rx: f32,
+    ry: f32,
     stops: []Stop,
 
     pub fn sample(self: Radial, px: f32, py: f32) [4]f32 {
-        if (self.r <= 0) return rampAt(self.stops, 1);
-        const dx = px - self.cx;
-        const dy = py - self.cy;
+        if (self.rx <= 0 or self.ry <= 0) return rampAt(self.stops, 1);
+        const dx = (px - self.cx) / self.rx;
+        const dy = (py - self.cy) / self.ry;
         const d = @sqrt(dx * dx + dy * dy);
-        return rampAt(self.stops, d / self.r);
+        return rampAt(self.stops, d);
     }
 };
 

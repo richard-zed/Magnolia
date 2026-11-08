@@ -1013,10 +1013,12 @@ test "a radial under the default unit is sized by the element box" {
         break;
     };
     const rad = (g orelse return error.NoGradient).radial;
-    // Centre of the rect, and a radius that puts the rim on the box edge.
+    // Centre of the rect, and radii that put the rim on each box edge.
+    // On a square box rx == ry; the non-square case is a separate test.
     try t.expectApproxEqAbs(@as(f32, 10), rad.cx, 0.01);
     try t.expectApproxEqAbs(@as(f32, 10), rad.cy, 0.01);
-    try t.expectApproxEqAbs(@as(f32, 5), rad.r, 0.01);
+    try t.expectApproxEqAbs(@as(f32, 5), rad.rx, 0.01);
+    try t.expectApproxEqAbs(@as(f32, 5), rad.ry, 0.01);
 }
 
 
