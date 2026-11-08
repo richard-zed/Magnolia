@@ -10,6 +10,8 @@ const FillRule = @import("raster.zig").FillRule;
 const numbers = @import("numbers.zig");
 const pathdata = @import("pathdata.zig");
 const stroke = @import("stroke.zig");
+const gradient = @import("gradient.zig");
+const defs = @import("defs.zig");
 const transform = @import("transform.zig");
 const PathBuf = @import("path.zig").PathBuf;
 
@@ -130,6 +132,19 @@ pub const Scanner = struct {
     /// stroke opacity this applies to fills too, so it lives beside the fill
     /// state rather than inside StrokeState.
     inherited_opacity: f32 = 1,
+    /// Paint servers collected from the document up front. Empty when the
+    /// document declares none, which is the common case for icon sets.
+    defs_set: ?*const defs.Set = null,
+    /// Stops backing the gradients handed out this parse. `Linear.stops` is a
+    /// slice, so something has to own it for the Icon's lifetime; the defs
+    /// collector's arrays do, and they outlive the scan.
+    grad_owner: ?*const defs.Set = null,
+    /// Every stop array this scan allocated, so the caller can transfer
+    /// ownership to the Icon and free them in `deinit`.
+    grad_stops: std.ArrayList([]gradient.Stop) = .empty,
+    /// Inherited gradient fill. Set when an ancestor's fill resolved to a
+    /// paint server; `inherited_fill` stays null so the flat path is unchanged.
+    inherited_grad: ?gradient.Linear = null,
 
     fn isSkipTag(name: []const u8) bool {
         const tags = [_][]const u8{ "defs", "clipPath", "mask", "symbol", "pattern", "marker", "style", "title", "desc", "metadata" };
@@ -315,6 +330,12 @@ pub const Scanner = struct {
                 try saved.rules.append(self.gpa, if (i < scratch.rules.items.len) scratch.rules.items[i] else saved.rule);
                 try saved.alphas.append(self.gpa, if (i < scratch.alphas.items.len) scratch.alphas.items[i] else saved.alpha);
                 try saved.colors.append(self.gpa, if (i < scratch.colors.items.len) scratch.colors.items[i] else scratch.color);
+                // Gradients must cross this boundary too. Missing them here is
+                // the same defect as the fill-colour drop: correct on the
+                // scratch buffer, discarded on transfer, so the element
+                // renders with nothing to paint and the run falls back to the
+                // caller's default.
+                try saved.gradients.append(self.gpa, if (i < scratch.gradients.items.len) scratch.gradients.items[i] else scratch.grad);
             }
             for (scratch.subpaths.items) |s| try saved.subpaths.append(self.gpa, base + s);
             return;
@@ -377,6 +398,9 @@ pub const Scanner = struct {
             // The stroke inherits the centreline's colour: `element` ran against
             // the scratch buffer, so the colour lives there, not on `dest`.
             try dest.colors.appendNTimes(self.gpa, stroke_color orelse scratch.color, out.items.len);
+            // A stroked *shape* has no gradient fill; its outline is painted
+            // with the stroke colour, so null is correct here.
+            try dest.gradients.appendNTimes(self.gpa, null, out.items.len);
             try dest.subpaths.append(self.gpa, base);
         }
     }
@@ -465,6 +489,16 @@ pub const Scanner = struct {
         // `fill=` / `style="fill:..."`, so stamping before it would only ever
         // see the parent's colour.
         self.pb.color = self.inherited_fill orelse self.pb.color;
+        self.pb.grad = null;
+        if (at.get("fill")) |f| self.pb.grad = self.resolveGradient(f, eff);
+        if (self.pb.grad == null) {
+            if (at.get("style")) |st| {
+                if (styleFill(st)) |sv| self.pb.grad = self.resolveGradient(sv, eff);
+            }
+        }
+        // A gradient overrides the flat colour it would otherwise have
+        // inherited, so `draw` takes the paint-server branch.
+        if (self.pb.grad != null) self.pb.color = null;
 
         // fill / stroke intent
         const fill_attr = at.get("fill");
@@ -602,14 +636,60 @@ pub const Scanner = struct {
     /// Folds `stroke*` and `fill` attributes into the inherited state.
     /// Called for containers, whose own geometry may be empty but whose
     /// children depend on these values.
+    /// Turns a `url(#id)` fill into a `Linear` in device space. Returns null
+    /// for everything else -- flat colours are handled by `parseColor`, and a
+    /// reference to a paint server that is missing or uses
+    /// objectBoundingBox is reported rather than approximated.
+    fn resolveGradient(self: *Scanner, val: []const u8, eff: Mat) ?gradient.Linear {
+        const id = defs.refId(val) orelse return null;
+        const set = self.defs_set orelse {
+            self.rep.add(self.gpa, "fill url(...) paint server not found");
+            return null;
+        };
+        const d = set.find(id) orelse {
+            self.rep.add(self.gpa, "fill url(...) paint server not found");
+            return null;
+        };
+        if (!d.user_space) {
+            self.rep.add(self.gpa, "gradientUnits=objectBoundingBox not supported");
+            return null;
+        }
+        // xlink:href chains: a gradient with no stops of its own borrows them.
+        var stops = d.stops.items;
+        var hops: usize = 0;
+        var cur = d;
+        while (stops.len == 0 and cur.href != null and hops < 8) : (hops += 1) {
+            const next = set.find(cur.href.?) orelse break;
+            stops = next.stops.items;
+            cur = next;
+        }
+        if (stops.len == 0) {
+            self.rep.add(self.gpa, "gradient has no stops");
+            return null;
+        }
+        var out_stops = self.gpa.alloc(gradient.Stop, stops.len) catch return null;
+        self.grad_stops.append(self.gpa, out_stops) catch {
+            self.gpa.free(out_stops);
+            return null;
+        };
+        for (stops, 0..) |sdef, k| {
+            out_stops[k] = .{ .offset = sdef.offset, .color = sdef.color, .opacity = sdef.opacity };
+        }
+        const p0 = eff.apply(.{ .x = d.x1 orelse 0, .y = d.y1 orelse 0 });
+        const p1 = eff.apply(.{ .x = d.x2 orelse 1, .y = d.y2 orelse 0 });
+        return .{ .x0 = p0.x, .y0 = p0.y, .x1 = p1.x, .y1 = p1.y, .stops = out_stops };
+    }
+
     fn absorbPaint(self: *Scanner, at: *const Attrs) void {
         if (at.get("fill")) |f| {
             self.inherited_no_fill = std.mem.eql(u8, f, "none");
             if (!self.inherited_no_fill) {
                 if (std.mem.startsWith(u8, f, "url(")) {
-                    // Paint servers are a separate layer; record rather than
-                    // silently painting the previous colour.
-                    self.rep.add(self.gpa, "fill url(...) paint server not supported");
+                    // Leave it unresolved here. `absorbPaint` has no CTM, so it
+                    // cannot place a gradient; `resolveGradient` does that at
+                    // the stamp site and reports only what it cannot resolve.
+                    // Warning here too reported a failure for gradients that
+                    // subsequently rendered perfectly.
                 } else if (parseColor(f)) |c| {
                     self.inherited_fill = c;
                 }
@@ -619,7 +699,7 @@ pub const Scanner = struct {
                 self.inherited_no_fill = std.mem.eql(u8, sv, "none");
                 if (!self.inherited_no_fill) {
                     if (std.mem.startsWith(u8, sv, "url(")) {
-                        self.rep.add(self.gpa, "fill url(...) paint server not supported");
+                        // See the bare-attribute arm above.
                     } else if (parseColor(sv)) |c| {
                         self.inherited_fill = c;
                     }

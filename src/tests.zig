@@ -540,6 +540,8 @@ test "a gradient fill is reported" {
 
 test "the same limitation is reported once, not once per element" {
     // Un-deduplicated, a document of gradient paths buries every other report.
+    // These reference gradients that do not exist, so the report is the only
+    // thing the parser can do with them.
     const svg =
         "<svg viewBox=\"0 0 20 20\">" ++
         "<path style=\"fill:url(#a);stroke:none\" d=\"M2 2 L8 8\"/>" ++
@@ -550,7 +552,89 @@ test "the same limitation is reported once, not once per element" {
     defer icon.deinit(t.allocator);
     var n: usize = 0;
     for (icon.report.unsupported.items) |u| {
-        if (std.mem.indexOf(u8, u, "fill url(") != null) n += 1;
+        if (std.mem.indexOf(u8, u, "paint server") != null) n += 1;
     }
     try t.expectEqual(@as(usize, 1), n);
+}
+
+const gradSvg =
+    "<svg viewBox=\"0 0 20 20\">" ++
+    "<defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"0\" y1=\"0\" x2=\"20\" y2=\"0\">" ++
+    "<stop offset=\"0\" style=\"stop-color:#000000;stop-opacity:1\"/>" ++
+    "<stop offset=\"1\" style=\"stop-color:#ffffff;stop-opacity:1\"/>" ++
+    "</linearGradient></defs>" ++
+    "<rect x=\"0\" y=\"0\" width=\"20\" height=\"20\" style=\"fill:url(#g);stroke:none\"/>" ++
+    "</svg>";
+
+test "a resolvable gradient fills, and is not reported" {
+    var icon = try mag.parseIconSized(t.allocator, gradSvg, 20, 20);
+    defer icon.deinit(t.allocator);
+    var n: usize = 0;
+    for (icon.gradients.items) |g| if (g != null) { n += 1; };
+    try t.expect(n > 0);
+    // Resolving it means there is nothing to complain about.
+    for (icon.report.unsupported.items) |u| {
+        try t.expect(std.mem.indexOf(u8, u, "paint server") == null);
+    }
+}
+
+test "an href chain borrows the referenced gradient's stops" {
+    // Inkscape writes the stops on one <linearGradient> and the geometry on
+    // another that only points at it. Missing the chain leaves a gradient with
+    // no stops, which paints nothing at all.
+    const svg =
+        "<svg viewBox=\"0 0 20 20\">" ++
+        "<defs>" ++
+        "<linearGradient id=\"base\"><stop offset=\"0\" style=\"stop-color:#000000\"/>" ++
+        "<stop offset=\"1\" style=\"stop-color:#ffffff\"/></linearGradient>" ++
+        "<linearGradient id=\"g2\" xlink:href=\"#base\" gradientUnits=\"userSpaceOnUse\" x1=\"0\" y1=\"0\" x2=\"20\" y2=\"0\"/>" ++
+        "</defs>" ++
+        "<rect x=\"0\" y=\"0\" width=\"20\" height=\"20\" style=\"fill:url(#g2);stroke:none\"/>" ++
+        "</svg>";
+    var icon = try mag.parseIconSized(t.allocator, svg, 20, 20);
+    defer icon.deinit(t.allocator);
+    var found = false;
+    for (icon.gradients.items) |g| {
+        if (g) |gg| {
+            try t.expectEqual(@as(usize, 2), gg.stops.len);
+            found = true;
+        }
+    }
+    try t.expect(found);
+}
+
+test "objectBoundingBox is reported rather than guessed at" {
+    // The SVG default, and unresolvable without the element bbox. Painting it
+    // as if it were userSpaceOnUse would look plausible and be wrong.
+    const svg =
+        "<svg viewBox=\"0 0 20 20\">" ++
+        "<defs><linearGradient id=\"g\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\">" ++
+        "<stop offset=\"0\" style=\"stop-color:#000000\"/></linearGradient></defs>" ++
+        "<rect x=\"0\" y=\"0\" width=\"20\" height=\"20\" style=\"fill:url(#g);stroke:none\"/>" ++
+        "</svg>";
+    var icon = try mag.parseIconSized(t.allocator, svg, 20, 20);
+    defer icon.deinit(t.allocator);
+    try t.expect(reportsContains(&icon, "objectBoundingBox"));
+}
+
+test "a gradient sweeps across the shape rather than painting one colour" {
+    // The end-to-end assertion. An inert gradient compiles, resolves and fills
+    // with a single colour, so only the pixels can tell the difference.
+    const svg = gradSvg;
+    var icon = try mag.parseIconSized(t.allocator, svg, 20, 20);
+    defer icon.deinit(t.allocator);
+    const px = try t.allocator.alloc(u8, 20 * 20 * 4);
+    defer t.allocator.free(px);
+    @memset(px, 0);
+    const acc = try t.allocator.alloc(f32, 20);
+    defer t.allocator.free(acc);
+    var r = mag.Raster{ .gpa = t.allocator, .w = 20, .h = 20, .px = px, .acc = acc };
+    defer r.xs.deinit(t.allocator);
+    icon.draw(&r, .{ 255, 0, 0 });
+
+    // Circle radius 2 at x=2 and x=18, well clear of the antialiased ends.
+    const left = px[(10 * 20 + 2) * 4];
+    const right = px[(10 * 20 + 18) * 4];
+    try t.expect(left < 40);
+    try t.expect(right > 215);
 }

@@ -8,6 +8,7 @@
 const std = @import("std");
 const geom = @import("geom.zig");
 const FillRule = @import("raster.zig").FillRule;
+const gradient = @import("gradient.zig");
 
 const Pt = geom.Pt;
 const Edge = geom.Edge;
@@ -22,6 +23,10 @@ pub const PathBuf = struct {
     rules: std.ArrayList(FillRule) = .empty,
     /// Parallel to `edges`; see `Icon.colors`.
     colors: std.ArrayList(?[3]u8) = .empty,
+    /// Parallel to `edges`. Set when the element's fill is a paint server;
+    /// `colors` stays null in that case so a caller unaware of gradients keeps
+    /// its old behaviour.
+    gradients: std.ArrayList(?gradient.Linear) = .empty,
     /// Parallel to `edges`; see `Icon.alphas`.
     alphas: std.ArrayList(f32) = .empty,
     /// Opacity stamped onto every edge emitted from now on. Set per element
@@ -30,6 +35,8 @@ pub const PathBuf = struct {
     /// Fill colour stamped onto every edge, same lifetime as `alpha`. Null
     /// means the element declared no colour and the renderer's default stands.
     color: ?[3]u8 = null,
+    /// Gradient fill stamped onto every edge, same lifetime as `color`.
+    grad: ?gradient.Linear = null,
     /// Rule applied to edges appended from now on.
     rule: FillRule = .nonzero,
     /// Index into `edges` where each subpath begins. A stroker needs this to
@@ -53,6 +60,7 @@ pub const PathBuf = struct {
         pb.rules.deinit(pb.gpa);
         pb.alphas.deinit(pb.gpa);
         pb.colors.deinit(pb.gpa);
+        pb.gradients.deinit(pb.gpa);
         pb.subpaths.deinit(pb.gpa);
     }
 
@@ -69,6 +77,7 @@ pub const PathBuf = struct {
         try pb.rules.append(pb.gpa, pb.rule);
         try pb.alphas.append(pb.gpa, pb.alpha);
         try pb.colors.append(pb.gpa, pb.color);
+        try pb.gradients.append(pb.gpa, pb.grad);
         pb.cur = p;
     }
     pub fn cubic(pb: *PathBuf, c1: geom.Pt, c2: geom.Pt, p: geom.Pt) !void {

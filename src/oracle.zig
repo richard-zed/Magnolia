@@ -32,6 +32,17 @@ pub fn main(init: std.process.Init) !void {
     defer gpa.free(acc);
     var r = mag.Raster{ .gpa = gpa, .w = 96, .h = 96, .px = px, .acc = acc };
     defer r.xs.deinit(gpa);
+    var ng: usize = 0;
+    var nc: usize = 0;
+    for (icon.gradients.items) |g| if (g != null) { ng += 1; };
+    for (icon.colors.items) |c| if (c != null) { nc += 1; };
+    std.debug.print("gradients={d} colors={d} total={d}\n", .{ ng, nc, icon.gradients.items.len });
+    for (icon.gradients.items, 0..) |g, gi| {
+        if (g) |gg| {
+            std.debug.print(" g{d}: ({d:.1},{d:.1})->({d:.1},{d:.1}) stops={d}\n", .{ gi, gg.x0, gg.y0, gg.x1, gg.y1, gg.stops.len });
+            break;
+        }
+    }
     icon.draw(&r, .{ 0, 0, 0 });
 
     const vb = icon.view orelse .{ 0, 0, 24, 24 };

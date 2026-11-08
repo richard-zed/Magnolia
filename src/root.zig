@@ -8,6 +8,8 @@
 //! a test, a window loop, or an app that already holds an `std.Io`.
 
 const std = @import("std");
+const gradient = @import("magnolia/gradient.zig");
+const defs = @import("magnolia/defs.zig");
 
 pub const geom = @import("magnolia/geom.zig");
 pub const path = @import("magnolia/path.zig");
@@ -44,6 +46,12 @@ pub const Icon = struct {
     /// none. Per edge for the same reason as `rules`: one document mixes
     /// coloured shapes freely.
     colors: std.ArrayList(?[3]u8) = .empty,
+    /// Parallel to `edges`; a non-null entry means that edge is painted by a
+    /// paint server and `colors` for it stays null.
+    gradients: std.ArrayList(?gradient.Linear) = .empty,
+    /// Stop arrays allocated while resolving paint servers. Owned here so
+    /// `Icon` can free them; each gradient's `stops` slice points into this.
+    grad_stops: std.ArrayList([]gradient.Stop) = .empty,
     /// Indices into `edges` where each closed subpath starts. Flat for the
     /// fill path; a stroker needs it to avoid welding contours together.
     subpaths: std.ArrayList(usize) = .empty,
@@ -67,11 +75,13 @@ pub const Icon = struct {
             const rule: raster.FillRule = if (i < self.rules.items.len) self.rules.items[i] else .nonzero;
             const alpha: f32 = if (i < self.alphas.items.len) self.alphas.items[i] else 1;
             const ecl: ?[3]u8 = if (i < self.colors.items.len) self.colors.items[i] else null;
+            const egl: ?gradient.Linear = if (i < self.gradients.items.len) self.gradients.items[i] else null;
             var j = i;
             while (j < self.edges.items.len) : (j += 1) {
                 const rj: raster.FillRule = if (j < self.rules.items.len) self.rules.items[j] else .nonzero;
                 const aj: f32 = if (j < self.alphas.items.len) self.alphas.items[j] else 1;
                 const cj: ?[3]u8 = if (j < self.colors.items.len) self.colors.items[j] else null;
+                const gj: ?gradient.Linear = if (j < self.gradients.items.len) self.gradients.items[j] else null;
                 if (rj != rule or aj != alpha) break;
                 // Null and explicit colour are both "same group" when neither
                 // side names one; compare the optionals directly so a run of
@@ -82,8 +92,23 @@ pub const Icon = struct {
                     const ev: [3]u8 = ecl.?;
                     if (!std.mem.eql(u8, &cv, &ev)) break;
                 }
+                // Gradient runs batch by stops-slice identity. Comparing the
+                // axis coordinates would merge two different paint servers
+                // that happen to share endpoints, and the second element would
+                // take the first one's colours. The stops slice is owned by
+                // whoever built the gradient and lives as long as the Icon.
+                if ((gj == null) != (egl == null)) break;
+                if (gj != null and egl != null) {
+                    const gv = gj.?;
+                    const ev = egl.?;
+                    if (gv.stops.ptr != ev.stops.ptr or gv.stops.len != ev.stops.len) break;
+                }
             }
-            r.fillRuleAlpha(self.edges.items[i..j], ecl orelse col, rule, alpha);
+            if (egl) |g| {
+                r.fillRuleGradient(self.edges.items[i..j], g, rule, alpha);
+            } else {
+                r.fillRuleAlpha(self.edges.items[i..j], ecl orelse col, rule, alpha);
+            }
             i = j - 1;
         }
     }
@@ -93,6 +118,9 @@ pub const Icon = struct {
         self.rules.deinit(gpa);
         self.alphas.deinit(gpa);
         self.colors.deinit(gpa);
+        for (self.grad_stops.items) |st| gpa.free(st);
+        self.grad_stops.deinit(gpa);
+        self.gradients.deinit(gpa);
         self.subpaths.deinit(gpa);
         self.report.deinit(gpa);
         self.* = .{};
@@ -117,14 +145,20 @@ fn parseIconInner(gpa: std.mem.Allocator, bytes: []const u8, tx: ?f32, ty: ?f32)
     var rep = Report{};
     errdefer rep.deinit(gpa);
 
+    var gset = try defs.collect(gpa, bytes);
+    defer gset.deinit();
+
     var sc = Scanner{ .gpa = gpa, .pb = &pb, .rep = &rep, .tx = tx, .ty = ty };
+    sc.defs_set = &gset;
     errdefer pb.rules.deinit(gpa);
     errdefer pb.alphas.deinit(gpa);
     errdefer pb.colors.deinit(gpa);
+    errdefer pb.gradients.deinit(gpa);
     errdefer pb.subpaths.deinit(gpa);
     try sc.run(bytes);
+    const gstops = sc.grad_stops;
 
-    return .{ .edges = pb.edges, .rules = pb.rules, .alphas = pb.alphas, .colors = pb.colors, .subpaths = pb.subpaths, .view = sc.view, .report = rep };
+    return .{ .grad_stops = gstops, .edges = pb.edges, .rules = pb.rules, .alphas = pb.alphas, .colors = pb.colors, .gradients = pb.gradients, .subpaths = pb.subpaths, .view = sc.view, .report = rep };
 }
 
 test {
