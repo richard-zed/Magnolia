@@ -29,6 +29,10 @@ const StrokeState = struct {
     /// Stroke paint. Separate from the fill colour: an element routinely has
     /// `fill:none;stroke:#fff`, so the two cannot share one field.
     color: ?[3]u8 = null,
+    /// Gradient stroke (`stroke:url(#g)`). Parallel to `color` for exactly the
+    /// same reason the fill has a separate `grad`: a paint server replaces the
+    /// flat colour rather than supplementing it.
+    grad: ?gradient.Linear = null,
 };
 const DStats = pathdata.DStats;
 
@@ -361,6 +365,7 @@ pub const Scanner = struct {
         // here painted the daisy's white petals in whatever the shape's fill
         // resolved to.
         const stroke_color: ?[3]u8 = if (self.inherited_stroke) |s| s.color else null;
+        const stroke_grad: ?gradient.Linear = if (self.inherited_stroke) |s| s.grad else null;
         var pts: std.ArrayList(Pt) = .empty;
         defer pts.deinit(self.gpa);
         var out: std.ArrayList(geom.Edge) = .empty;
@@ -398,9 +403,10 @@ pub const Scanner = struct {
             // The stroke inherits the centreline's colour: `element` ran against
             // the scratch buffer, so the colour lives there, not on `dest`.
             try dest.colors.appendNTimes(self.gpa, stroke_color orelse scratch.color, out.items.len);
-            // A stroked *shape* has no gradient fill; its outline is painted
-            // with the stroke colour, so null is correct here.
-            try dest.gradients.appendNTimes(self.gpa, null, out.items.len);
+            // A stroked shape paints with the STROKE paint, gradient included.
+            // Stamping null here discarded a resolved `stroke:url(#g)` and left
+            // the outline with no paint at all.
+            try dest.gradients.appendNTimes(self.gpa, stroke_grad, out.items.len);
             try dest.subpaths.append(self.gpa, base);
         }
     }
@@ -504,11 +510,18 @@ pub const Scanner = struct {
         const fill_attr = at.get("fill");
         const style_attr = at.get("style");
         const fill_none = if (fill_attr) |f| std.mem.eql(u8, f, "none") else false;
-        const fill_opacity_zero = if (at.get("fill-opacity") orelse (if (style_attr) |s| styleProp(s, "fill-opacity") else null)) |o| (blk: {
+        // fill-opacity is a real coverage multiplier, not just a "is this
+        // zero" probe. Reading only for zero meant an element at 0.6 painted
+        // fully opaque -- the value was parsed and thrown away.
+        const fill_opacity_val: f32 = if (at.get("fill-opacity") orelse (if (style_attr) |s| styleProp(s, "fill-opacity") else null)) |o| (blk: {
             var i: usize = 0;
-            const v = scanNum(o, &i) orelse break :blk false;
-            break :blk v == 0;
-        }) else false;
+            const v = scanNum(o, &i) orelse break :blk 1.0;
+            break :blk std.math.clamp(v, 0, 1);
+        }) else 1.0;
+        const fill_opacity_zero = fill_opacity_val == 0;
+        // Fold it into the per-edge alpha the fill will be stamped with. The
+        // base is captured first so a later element cannot compound it.
+        if (fill_opacity_val < 1.0) self.pb.alpha = self.pb.alpha * fill_opacity_val;
         const style_fill_none = if (style_attr) |s| (if (styleProp(s, "fill")) |fv| std.mem.eql(u8, fv, "none") else false) else false;
         self.pending_stroke = null;
         var stroke_opts: ?stroke.Options = null;
@@ -542,6 +555,18 @@ pub const Scanner = struct {
                 if (sml) |v| {
                     var mi: usize = 0;
                     so.miter_limit = scanNum(v, &mi) orelse so.miter_limit;
+                }
+                // Resolve a paint-server stroke here, where the CTM is in
+                // scope. `absorbPaint` cannot do it (no `eff`), so without
+                // this a `stroke:url(#g)` had no colour at all and the
+                // stroked outline fell through to the draw default: black.
+                if (std.mem.startsWith(u8, s, "url(")) {
+                    if (self.resolveGradient(s, eff)) |g| {
+                        var cur = self.inherited_stroke orelse StrokeState{};
+                        cur.grad = g;
+                        cur.color = null;
+                        self.inherited_stroke = cur;
+                    }
                 }
                 stroke_opts = so;
             }
@@ -733,11 +758,10 @@ pub const Scanner = struct {
         var cur = self.inherited_stroke orelse StrokeState{};
         cur.present = true;
         if (std.mem.startsWith(u8, stroke_val, "url(")) {
-            // Same layer as fill's paint servers, and equally unresolvable
-            // here. Without this the stroke kept whatever colour it inherited
-            // and nothing said so -- iris.svg's gradient stroke was painting
-            // the previous path's fill colour.
-            self.rep.add(self.gpa, "stroke url(...) paint server not supported");
+            // Leave it unresolved. Like the fill arm above, this function has
+            // no CTM, so it cannot place a gradient; the stroke_opts block in
+            // `element` resolves it against `eff`. Warning here reported a
+            // failure for gradients that then rendered correctly.
         } else if (parseColor(stroke_val)) |c| cur.color = c;
         if (at.get("stroke-width")) |w| {
             var wi: usize = 0;

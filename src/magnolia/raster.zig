@@ -235,13 +235,17 @@ pub const Raster = struct {
                     const s: f32 = @floatFromInt(col[ch]);
                     self.px[o + ch] = @intFromFloat(std.math.clamp(d + (s - d) * cov, 0, 255));
                 }
-                // Only a fully opaque shape may claim the alpha channel; a
-                // translucent one leaves whatever is beneath it visible.
-                if (alpha >= 1) {
+                // Coverage drives the alpha channel; `alpha` only scales it.
+                // Writing 255 whenever the shape was fully opaque threw away
+                // every partial-coverage value the scanline had just computed
+                // exactly, so a black shape on a blank background came out
+                // hard-edged no matter how good the sampling was.
+                const eff = std.math.clamp(cov0 * alpha, 0, 1);
+                if (eff >= 1) {
                     self.px[o + 3] = 255;
                 } else {
                     const a: f32 = @floatFromInt(self.px[o + 3]);
-                    const na: f32 = a + (255 - a) * cov0;
+                    const na = a + (255 - a) * eff;
                     self.px[o + 3] = @intFromFloat(std.math.clamp(na, 0, 255));
                 }
             }

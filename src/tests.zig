@@ -50,6 +50,14 @@ fn alphaAt(px: []const u8, x: usize, y: usize) u8 {
     return px[(y * 40 + x) * 4 + 3];
 }
 
+/// RGB of one pixel in the 40x40 stroke harness. Asserting on colour rather
+/// than alpha is what catches "painted, but with the wrong paint" -- a stroked
+/// outline with no resolved colour is fully inked and reads black.
+fn pixelAt(px: []const u8, x: usize, y: usize) [3]u8 {
+    const o = (y * 40 + x) * 4;
+    return .{ px[o], px[o + 1], px[o + 2] };
+}
+
 // ------------------------------------------------------------------ winding
 test "a reversed inner contour is a hole, not a disc" {
     var icon = try mag.parseIcon(t.allocator, ring_svg);
@@ -519,15 +527,34 @@ fn reportsContains(icon: *const mag.Icon, needle: []const u8) bool {
     return false;
 }
 
-test "a gradient stroke is reported rather than silently recoloured" {
-    // parseColor returns null for url(), so the stroke kept whatever colour it
-    // inherited and nothing said so. iris.svg's gradient stroke rendered in the
-    // previous path's fill colour with a clean report.
+test "a gradient stroke paints its stops, not black" {
+    // Was asserted the other way round: the stroke had no paint at all, so the
+    // honest behaviour was to report it. Now it resolves, and the check has to
+    // be on PIXELS -- an element with fill:none and a url() stroke used to
+    // render solid black, which a report-based test happily passed.
     const svg =
-        "<svg viewBox=\"0 0 20 20\"><path style=\"fill:none;stroke:url(#g);stroke-width:2\" d=\"M2 10 L18 10\"/></svg>";
-    var icon = try mag.parseIconSized(t.allocator, svg, 20, 20);
-    defer icon.deinit(t.allocator);
-    try t.expect(reportsContains(&icon, "stroke url("));
+        "<svg viewBox=\"0 0 20 20\"><defs>" ++
+        "<linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x1=\"2\" y1=\"0\" x2=\"18\" y2=\"0\">" ++
+        "<stop offset=\"0\" stop-color=\"#ff0000\"/><stop offset=\"1\" stop-color=\"#00ff00\"/>" ++
+        "</linearGradient></defs>" ++
+        "<path style=\"fill:none;stroke:url(#g);stroke-width:4\" d=\"M2 10 L18 10\"/></svg>";
+    var r = try renderStroke(t.allocator, svg);
+    defer r.icon.deinit(t.allocator);
+    defer t.allocator.free(r.px);
+
+    // Left end near the red stop, right end near the green one. Neither is
+    // black: a stroked outline with no resolved paint falls through to the
+    // draw default and reads 0,0,0.
+    // The stroke is 4 rows thick and the fit centres a 20-unit viewBox in
+    // canvas 24, so the body sits near y=8..11 -- not the vertical middle.
+    const left = pixelAt(r.px, 6, 9);
+    try t.expect(left[0] > 150 and left[1] < 100);
+    // Greenward: the ramp must move toward green along the stroke.
+    const right = pixelAt(r.px, 16, 9);
+    try t.expect(right[1] > left[1] and right[0] < left[0]);
+    // Nothing black: a stroked outline with no resolved paint reads 0,0,0.
+    const body = pixelAt(r.px, 12, 9);
+    try t.expect(!(body[0] < 30 and body[1] < 30 and body[2] < 30));
 }
 
 test "a gradient fill is reported" {
@@ -637,4 +664,38 @@ test "a gradient sweeps across the shape rather than painting one colour" {
     const right = px[(10 * 20 + 18) * 4];
     try t.expect(left < 40);
     try t.expect(right > 215);
+}
+
+test "a 45 degree edge antialiases to half coverage" {
+    // The analytic answer for an edge crossing the pixel centre diagonally is
+    // exactly 0.5. Partial coverage used to be computed correctly and then
+    // discarded: the alpha channel was forced to 255 whenever the shape's
+    // opacity was 1, so a black shape on a blank background came out hard
+    // edged however good the sampling was.
+    const svg =
+        "<svg viewBox=\"0 0 32 32\">" ++
+        "<rect x=\"0\" y=\"0\" width=\"32\" height=\"32\" fill=\"#ffffff\"/>" ++
+        "<path d=\"M4 4 L28 28 L4 28 Z\" fill=\"#000000\"/>" ++
+        "</svg>";
+    var icon = try mag.parseIconSized(t.allocator, svg, 32, 32);
+    defer icon.deinit(t.allocator);
+    const px = try t.allocator.alloc(u8, 32 * 32 * 4);
+    defer t.allocator.free(px);
+    @memset(px, 255);
+    const acc = try t.allocator.alloc(f32, 32);
+    defer t.allocator.free(acc);
+    var r = mag.Raster{ .gpa = t.allocator, .w = 32, .h = 32, .px = px, .acc = acc };
+    defer r.xs.deinit(t.allocator);
+    icon.draw(&r, .{ 255, 0, 0 });
+
+    // Row 16, the pixel straddling the diagonal: half covered, so the colour
+    // must land near mid grey rather than white or black.
+    const o = (16 * 32 + 16) * 4;
+    const v = px[o];
+    try t.expect(v > 105);
+    try t.expect(v < 150);
+    // And it must NOT be a hard edge: the pixel inside the shape is solidly
+    // black (the fill), while the one past the boundary is pure white.
+    try t.expectEqual(@as(u8, 0), px[(16 * 32 + 13) * 4]);
+    try t.expectEqual(@as(u8, 255), px[(16 * 32 + 18) * 4]);
 }
