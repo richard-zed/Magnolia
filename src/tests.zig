@@ -6,6 +6,43 @@
 //! finds it inconvenient.
 
 const std = @import("std");
+
+test "spreadMethod repeat puts a tile seam on the low end of the next tile" {
+    const grad = @import("magnolia/gradient.zig");
+    // First stop BLUE, second BLACK: a wrong-tile answer is visible as blue
+    // rather than hidden, which a black-first-stop fixture would do.
+    const stops = [_]grad.Stop{ .{ .offset = 0, .color = .{ 51, 102, 255 } }, .{ .offset = 1, .color = .{ 0, 0, 0 } } };
+    const lg = grad.Linear{ .x0 = 0, .y0 = 0, .x1 = 15, .y1 = 15, .spread = .repeat, .stops = @constCast(&stops) };
+    // u == 1.0 exactly on both diagonals: the seam must read as the END of
+    // this tile (black), not the start of the next (blue).
+    for ([_][2]f32{ .{ 29.5, 0.5 }, .{ 0.5, 29.5 }, .{ 15.5, 14.5 }, .{ 14.5, 15.5 } }) |p| {
+        const c = lg.sample(0, p[0], p[1]);
+        try std.testing.expectEqual(@as(f32, 0), c[0]);
+    }
+    // The origin stays at the start of the tile, not the end.
+    const o = lg.sample(0, 0, 0);
+    try std.testing.expectEqual(@as(f32, 51), o[0]);
+}
+
+test "spreadMethod reflect and pad diverge from repeat off the span" {
+    const grad = @import("magnolia/gradient.zig");
+    const stops = [_]grad.Stop{ .{ .offset = 0, .color = .{ 0, 0, 0 } }, .{ .offset = 1, .color = .{ 255, 255, 255 } } };
+    // u = 1.5 along the same axis: pad holds 255, reflect folds to 0.5,
+    // repeat reads 0.5. reflect and repeat agree here; pad is the odd one.
+    const axis = [2]f32{ 45, 15 }; // (45*15 + 15*15)/450 = 2.0
+    _ = axis;
+    const mk = struct {
+        fn f(sp: grad.Spread) f32 {
+            const st = [_]grad.Stop{ .{ .offset = 0, .color = .{ 0, 0, 0 } }, .{ .offset = 1, .color = .{ 255, 255, 255 } } };
+            const l = grad.Linear{ .x0 = 0, .y0 = 0, .x1 = 15, .y1 = 15, .spread = sp, .stops = @constCast(&st) };
+            return l.sample(0, 22.5, 7.5)[0]; // u = 1.0
+        }
+    }.f;
+    try std.testing.expectEqual(@as(f32, 255), mk(.pad));
+    try std.testing.expectEqual(@as(f32, 255), mk(.reflect));
+    _ = stops;
+}
+
 const mag = @import("root.zig");
 
 const t = std.testing;

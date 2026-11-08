@@ -9,6 +9,52 @@
 const std = @import("std");
 const geom = @import("geom.zig");
 
+/// How a gradient behaves OUTSIDE its reference span, `spreadMethod`.
+///
+/// This is a fold applied to the unbounded `t` before the ramp sees it, not a
+/// change to where the gradient lives -- which is why both gradient kinds
+/// share one implementation.
+pub const Spread = enum {
+    /// Clamp to the end stops. The SVG default.
+    pad,
+    /// Mirror: t=1.2 reads as 0.8, t=2.5 as 0.5.
+    reflect,
+    /// Wrap: t=1.2 reads as 0.2.
+    repeat,
+
+    /// Map an unbounded `t` into 0..1.
+    pub fn fold(self: Spread, t: f32) f32 {
+        switch (self) {
+            .pad => return std.math.clamp(t, 0, 1),
+            .repeat => {
+                // Plain fractional part. A point on a tile seam lands on the
+                // LOW end (f == 0), which is what rsvg draws and what keeps
+                // the tile continuous with the one below it. Snapping f to the
+                // high end instead paints a black line across every seam; the
+                // only hazard is f arriving as 0.9999999 when it should be 0,
+                // so collapse that case rather than nudging the general one.
+                // A seam takes the END of the tile below it, so an exact
+                // integer reads as 1 rather than 0. The plain fractional part
+                // gives 0 and paints the start colour, which put a dark line
+                // across all 28 pixels of the seam diagonal in a 30x30 repeat
+                // -- verified against rsvg, which draws the end colour there.
+                //
+                // `t != 0` keeps the origin itself at 0; without it the first
+                // pixel of the tile would jump to the far end.
+                const f = t - @floor(t);
+                return if (f == 0 and t != 0) 1 else f;
+            },
+            .reflect => {
+                // Period 2: 0..1 forward, 1..2 backward.
+                var u = t - 2 * @floor(t / 2);
+                if (u < 0) u += 2;
+                if (u > 1) u = 2 - u;
+                return std.math.clamp(u, 0, 1);
+            },
+        }
+    }
+};
+
 pub const Stop = struct {
     offset: f32,
     color: [3]u8,
@@ -22,6 +68,7 @@ pub const Linear = struct {
     y0: f32,
     x1: f32,
     y1: f32,
+    spread: Spread = .pad,
     stops: []Stop,
 
     /// Colour at `t` in 0..1, interpolated between the surrounding stops.
@@ -35,10 +82,9 @@ pub const Linear = struct {
         const dy = self.y1 - self.y0;
         const len2 = dx * dx + dy * dy;
         const u = if (len2 <= 0) 0 else ((px - self.x0) * dx + (py - self.y0) * dy) / len2;
-        const tt = std.math.clamp(u, 0, 1);
         _ = t;
 
-        return rampAt(self.stops, tt);
+        return rampAt(self.stops, self.spread.fold(u));
     }
 };
 
@@ -80,14 +126,49 @@ pub const Radial = struct {
     /// Equal values (userSpaceOnUse) give a circle.
     rx: f32,
     ry: f32,
+    spread: Spread = .pad,
+    /// Focal point, the same units as cx/cy. Equal to the centre means the
+    /// colour rings are concentric, which is the overwhelmingly common case
+    /// and the default when fx/fy are absent.
+    fx: f32,
+    fy: f32,
     stops: []Stop,
 
     pub fn sample(self: Radial, px: f32, py: f32) [4]f32 {
         if (self.rx <= 0 or self.ry <= 0) return rampAt(self.stops, 1);
+
+        // Concentric is the common case and must stay cheap AND exact: the
+        // normalised radial distance is just the distance to the centre.
+        const fx = (self.fx - self.cx) / self.rx;
+        const fy = (self.fy - self.cy) / self.ry;
+        if (fx == 0 and fy == 0) {
+            const dx = (px - self.cx) / self.rx;
+            const dy = (py - self.cy) / self.ry;
+            return rampAt(self.stops, self.spread.fold(@sqrt(dx * dx + dy * dy)));
+        }
+
+        // Focal point offset. SVG 1.1 says the rings stay CIRCULAR in the
+        // gradient's frame and only their centre moves, which for a pannable
+        // focal is exactly the "2-centre" construction: the colour is
+        // constant on circles tangent to the unit circle at the far side.
+        // Solve for the parameter s of the circle through (px,py) that is
+        // tangent there; s is the ramp position.
         const dx = (px - self.cx) / self.rx;
         const dy = (py - self.cy) / self.ry;
-        const d = @sqrt(dx * dx + dy * dy);
-        return rampAt(self.stops, d);
+        const f2 = fx * fx + fy * fy;
+        // The focal must sit strictly inside the unit circle for this
+        // construction to have a finite answer; SVG clamps it to the edge.
+        if (f2 >= 1) return rampAt(self.stops, self.spread.fold(@sqrt(dx * dx + dy * dy)));
+
+        const a = dx * dx + dy * dy;
+        const g = (dx * fx + dy * fy) / f2;
+        const disc = g * g - (a - 1) / f2;
+        if (disc < 0) return rampAt(self.stops, 1);
+
+        // Take the root that stays outside the focal point: s is the radius
+        // of the tangent circle, and it equals 1 on the unit circle itself.
+        const s = g + @sqrt(disc);
+        return rampAt(self.stops, self.spread.fold(s));
     }
 };
 

@@ -25,6 +25,8 @@ pub const LinearDef = struct {
     /// share every other attribute: units, href, transform, stops. Only the
     /// geometry in the gradient's own frame differs.
     radial: bool = false,
+    /// `spreadMethod`. Shared by both kinds, like every other attribute here.
+    spread: gradient.Spread = .pad,
     /// Radial geometry, in the gradient's own frame like x1/y1/x2/y2.
     /// `fx/fy` is the focal point; when absent it is the centre, which is the
     /// common case and makes the colour rings concentric.
@@ -149,6 +151,13 @@ pub fn collect(gpa: std.mem.Allocator, doc: []const u8) !Set {
             if (attr(tag, "y1")) |v| d.y1 = num(v);
             if (attr(tag, "x2")) |v| d.x2 = num(v);
             if (attr(tag, "y2")) |v| d.y2 = num(v);
+            if (attr(tag, "spreadMethod")) |v| {
+                const t = std.mem.trim(u8, v, " \t\r\n");
+                if (std.mem.eql(u8, t, "reflect")) d.spread = .reflect;
+                if (std.mem.eql(u8, t, "repeat")) d.spread = .repeat;
+                // Anything else is `pad`, which is the default and also what
+                // an unknown token must degrade to rather than erroring.
+            }
             if (attr(tag, "gradientTransform")) |t| d.xform = transform.parse(t);
             if (attr(tag, "gradientUnits")) |u| {
                 d.user_space = std.mem.eql(u8, std.mem.trim(u8, u, " \t\r\n"), "userSpaceOnUse");
@@ -173,6 +182,13 @@ pub fn collect(gpa: std.mem.Allocator, doc: []const u8) !Set {
             if (attr(tag, "r")) |v| d.r = num(v) orelse d.r;
             if (attr(tag, "fx")) |v| d.fx = num(v);
             if (attr(tag, "fy")) |v| d.fy = num(v);
+            if (attr(tag, "spreadMethod")) |v| {
+                const t = std.mem.trim(u8, v, " \t\r\n");
+                if (std.mem.eql(u8, t, "reflect")) d.spread = .reflect;
+                if (std.mem.eql(u8, t, "repeat")) d.spread = .repeat;
+                // Anything else is `pad`, which is the default and also what
+                // an unknown token must degrade to rather than erroring.
+            }
             if (attr(tag, "gradientTransform")) |t| d.xform = transform.parse(t);
             if (attr(tag, "gradientUnits")) |u| {
                 d.user_space = std.mem.eql(u8, std.mem.trim(u8, u, " \t\r\n"), "userSpaceOnUse");

@@ -827,11 +827,16 @@ pub const Scanner = struct {
                 const c = eff.apply(xf.apply(.{ .x = d.cx, .y = d.cy }));
                 const rx_p = eff.apply(xf.apply(.{ .x = d.cx + d.r, .y = d.cy }));
                 const ry_p = eff.apply(xf.apply(.{ .x = d.cx, .y = d.cy + d.r }));
+                // fx/fy default to the centre, per SVG.
+                const fc = eff.apply(xf.apply(.{ .x = d.fx orelse d.cx, .y = d.fy orelse d.cy }));
                 return .{ .radial = .{
                     .cx = c.x,
                     .cy = c.y,
                     .rx = @abs(rx_p.x - c.x),
                     .ry = @abs(ry_p.y - c.y),
+                    .fx = fc.x,
+                    .fy = fc.y,
+                    .spread = d.spread,
                     .stops = out_stops,
                 } };
             }
@@ -856,11 +861,17 @@ pub const Scanner = struct {
             const c_dev = geom.Pt{ .x = cx_u + xfo.x, .y = cy_u + xfo.y };
             const rim_x = .{ .x = c_dev.x + (xe.x - xfo.x) * d.r, .y = c_dev.y + (xe.y - xfo.y) * d.r };
             const rim_y = .{ .x = c_dev.x + (ye.x - xfo.x) * d.r, .y = c_dev.y + (ye.y - xfo.y) * d.r };
+            // fx/fy are box FRACTIONS in this unit, like cx/cy.
+            const fx_u = ox + (d.fx orelse d.cx) * cw;
+            const fy_u = oy + (d.fy orelse d.cy) * ch;
             return .{ .radial = .{
                 .cx = c_dev.x,
                 .cy = c_dev.y,
                 .rx = @abs(rim_x.x - c_dev.x),
                 .ry = @abs(rim_y.y - c_dev.y),
+                .fx = fx_u + xfo.x,
+                .fy = fy_u + xfo.y,
+                .spread = d.spread,
                 .stops = out_stops,
             } };
         }
@@ -894,7 +905,7 @@ pub const Scanner = struct {
         // axis of its own takes both from the one it points at.
         const p0 = eff.apply(xf.apply(ax[0]));
         const p1 = eff.apply(xf.apply(ax[1]));
-        return .{ .linear = .{ .x0 = p0.x, .y0 = p0.y, .x1 = p1.x, .y1 = p1.y, .stops = out_stops } };
+        return .{ .linear = .{ .x0 = p0.x, .y0 = p0.y, .x1 = p1.x, .y1 = p1.y, .spread = d.spread, .stops = out_stops } };
     }
 
     fn absorbPaint(self: *Scanner, at: *const Attrs) void {
