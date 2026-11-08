@@ -69,6 +69,12 @@ pub const Report = struct {
     /// cost is a handful of tiny allocations on a path that only runs when an
     /// icon is already degraded.
     pub fn add(self: *Report, gpa: std.mem.Allocator, s: []const u8) void {
+        // Deduplicate: the same limitation fires once per element, and a
+        // document with a dozen gradient paths would otherwise bury every
+        // other report under identical lines.
+        for (self.unsupported.items) |u| {
+            if (std.mem.eql(u8, u, s)) return;
+        }
         const owned = gpa.dupe(u8, s) catch return;
         self.unsupported.append(gpa, owned) catch gpa.free(owned);
     }
@@ -640,7 +646,13 @@ pub const Scanner = struct {
         }
         var cur = self.inherited_stroke orelse StrokeState{};
         cur.present = true;
-        if (parseColor(stroke_val)) |c| cur.color = c;
+        if (std.mem.startsWith(u8, stroke_val, "url(")) {
+            // Same layer as fill's paint servers, and equally unresolvable
+            // here. Without this the stroke kept whatever colour it inherited
+            // and nothing said so -- iris.svg's gradient stroke was painting
+            // the previous path's fill colour.
+            self.rep.add(self.gpa, "stroke url(...) paint server not supported");
+        } else if (parseColor(stroke_val)) |c| cur.color = c;
         if (at.get("stroke-width")) |w| {
             var wi: usize = 0;
             cur.opts.width = scanNum(w, &wi) orelse cur.opts.width;

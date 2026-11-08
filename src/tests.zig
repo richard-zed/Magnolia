@@ -511,3 +511,46 @@ test "a round cap does not leak past the stroke body" {
     // The body between the ends is inked.
     try t.expect(alphaAt(r.px, 20, 19) > 150);
 }
+
+fn reportsContains(icon: *const mag.Icon, needle: []const u8) bool {
+    for (icon.report.unsupported.items) |u| {
+        if (std.mem.indexOf(u8, u, needle) != null) return true;
+    }
+    return false;
+}
+
+test "a gradient stroke is reported rather than silently recoloured" {
+    // parseColor returns null for url(), so the stroke kept whatever colour it
+    // inherited and nothing said so. iris.svg's gradient stroke rendered in the
+    // previous path's fill colour with a clean report.
+    const svg =
+        "<svg viewBox=\"0 0 20 20\"><path style=\"fill:none;stroke:url(#g);stroke-width:2\" d=\"M2 10 L18 10\"/></svg>";
+    var icon = try mag.parseIconSized(t.allocator, svg, 20, 20);
+    defer icon.deinit(t.allocator);
+    try t.expect(reportsContains(&icon, "stroke url("));
+}
+
+test "a gradient fill is reported" {
+    const svg =
+        "<svg viewBox=\"0 0 20 20\"><path style=\"fill:url(#g);stroke:none\" d=\"M2 2 L18 18\"/></svg>";
+    var icon = try mag.parseIconSized(t.allocator, svg, 20, 20);
+    defer icon.deinit(t.allocator);
+    try t.expect(reportsContains(&icon, "fill url("));
+}
+
+test "the same limitation is reported once, not once per element" {
+    // Un-deduplicated, a document of gradient paths buries every other report.
+    const svg =
+        "<svg viewBox=\"0 0 20 20\">" ++
+        "<path style=\"fill:url(#a);stroke:none\" d=\"M2 2 L8 8\"/>" ++
+        "<path style=\"fill:url(#b);stroke:none\" d=\"M10 2 L18 8\"/>" ++
+        "<path style=\"fill:url(#c);stroke:none\" d=\"M2 10 L8 18\"/>" ++
+        "</svg>";
+    var icon = try mag.parseIconSized(t.allocator, svg, 20, 20);
+    defer icon.deinit(t.allocator);
+    var n: usize = 0;
+    for (icon.report.unsupported.items) |u| {
+        if (std.mem.indexOf(u8, u, "fill url(") != null) n += 1;
+    }
+    try t.expectEqual(@as(usize, 1), n);
+}
