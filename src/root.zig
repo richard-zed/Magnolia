@@ -8,7 +8,7 @@
 //! a test, a window loop, or an app that already holds an `std.Io`.
 
 const std = @import("std");
-const gradient = @import("magnolia/gradient.zig");
+pub const gradient = @import("magnolia/gradient.zig");
 const defs = @import("magnolia/defs.zig");
 
 pub const geom = @import("magnolia/geom.zig");

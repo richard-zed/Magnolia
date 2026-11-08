@@ -708,8 +708,20 @@ pub const Scanner = struct {
         for (stops, 0..) |sdef, k| {
             out_stops[k] = .{ .offset = sdef.offset, .color = sdef.color, .opacity = sdef.opacity };
         }
-        const p0 = eff.apply(.{ .x = d.x1 orelse 0, .y = d.y1 orelse 0 });
-        const p1 = eff.apply(.{ .x = d.x2 orelse 1, .y = d.y2 orelse 0 });
+        // gradientTransform sits between the gradient's own coordinate frame
+        // and user space, so it composes on the LEFT of the CTM: a point goes
+        // gradient-local -> xform -> user space -> eff -> device. Applying it
+        // after `eff` would rotate the axis about the device origin instead of
+        // the gradient's, which is the same axis for a pure translate but
+        // wrong for every rotate and scale.
+        //
+        // Inherited through the href chain like the stops: a gradient with no
+        // axis of its own takes both from the one it points at.
+        const xf = d.xform orelse cur.xform orelse geom.Mat{};
+        const g0 = xf.apply(.{ .x = d.x1 orelse 0, .y = d.y1 orelse 0 });
+        const g1 = xf.apply(.{ .x = d.x2 orelse 1, .y = d.y2 orelse 0 });
+        const p0 = eff.apply(g0);
+        const p1 = eff.apply(g1);
         return .{ .x0 = p0.x, .y0 = p0.y, .x1 = p1.x, .y1 = p1.y, .stops = out_stops };
     }
 

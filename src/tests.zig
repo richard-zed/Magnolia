@@ -756,3 +756,67 @@ test "an explicitly coloured stroke ignores the caller's colour" {
     try t.expectEqual(@as(u8, 0), px[o + 1]);
     try t.expectEqual(@as(u8, 0), px[o + 2]);
 }
+
+// -------------------------------------------------------- gradientTransform
+// Both gradients in iris.svg carry a pure translate, where "applied" and
+// "ignored" can look alike. A rotation about a centre point cannot: the axis
+// changes direction, so reading it back proves the matrix ran in gradient
+// space rather than being dropped or mis-composed with the CTM.
+test "gradientTransform rotates the axis in gradient space" {
+    const src =
+        \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
+        \\  <defs>
+        \\    <linearGradient id="g" gradientUnits="userSpaceOnUse"
+        \\                    x1="0" y1="0" x2="20" y2="0"
+        \\                    gradientTransform="rotate(90 10 10)">
+        \\      <stop offset="0" stop-color="#ff0000"/>
+        \\      <stop offset="1" stop-color="#0000ff"/>
+        \\    </linearGradient>
+        \\  </defs>
+        \\  <rect x="0" y="0" width="20" height="20" fill="url(#g)"/>
+        \\</svg>
+    ;
+    var icon = try mag.parseIcon(t.allocator, src);
+    defer icon.deinit(t.allocator);
+
+    var found: ?mag.gradient.Linear = null;
+    for (icon.gradients.items) |g| if (g) |gg| {
+        found = gg;
+        break;
+    };
+    const g = found orelse return error.NoGradient;
+
+    // Declared horizontal, rotated 90 degrees about the centre: the axis must
+    // come back vertical, top to bottom.
+    try t.expectApproxEqAbs(@as(f32, 20), g.x0, 0.01);
+    try t.expectApproxEqAbs(@as(f32, 0), g.y0, 0.01);
+    try t.expectApproxEqAbs(@as(f32, 20), g.x1, 0.01);
+    try t.expectApproxEqAbs(@as(f32, 20), g.y1, 0.01);
+}
+
+test "a gradient with no gradientTransform is unchanged" {
+    const src =
+        \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
+        \\  <defs>
+        \\    <linearGradient id="g" gradientUnits="userSpaceOnUse"
+        \\                    x1="0" y1="0" x2="20" y2="0">
+        \\      <stop offset="0" stop-color="#ff0000"/>
+        \\      <stop offset="1" stop-color="#0000ff"/>
+        \\    </linearGradient>
+        \\  </defs>
+        \\  <rect x="0" y="0" width="20" height="20" fill="url(#g)"/>
+        \\</svg>
+    ;
+    var icon = try mag.parseIcon(t.allocator, src);
+    defer icon.deinit(t.allocator);
+
+    var found: ?mag.gradient.Linear = null;
+    for (icon.gradients.items) |g| if (g) |gg| {
+        found = gg;
+        break;
+    };
+    const g = found orelse return error.NoGradient;
+    try t.expectApproxEqAbs(@as(f32, 0), g.x0, 0.01);
+    try t.expectApproxEqAbs(@as(f32, 20), g.x1, 0.01);
+    try t.expectApproxEqAbs(@as(f32, 0), g.y1, 0.01);
+}

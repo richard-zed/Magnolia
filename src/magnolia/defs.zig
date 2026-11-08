@@ -7,6 +7,8 @@
 
 const std = @import("std");
 const gradient = @import("gradient.zig");
+const geom = @import("geom.zig");
+const transform = @import("transform.zig");
 
 pub const LinearDef = struct {
     id: []const u8,
@@ -19,6 +21,10 @@ pub const LinearDef = struct {
     /// True only when `gradientUnits="userSpaceOnUse"`. The SVG default is
     /// objectBoundingBox, which cannot be resolved without the element bbox.
     units_declared_obb: bool = false,
+    /// `gradientTransform`. Applied in gradient space, before the CTM: the
+    /// axis coordinates x1/y1/x2/y2 are given in the gradient's own frame and
+    /// this matrix moves them from there into user space.
+    xform: ?geom.Mat = null,
     stops: std.ArrayList(StopDef) = .empty,
 };
 
@@ -131,6 +137,7 @@ pub fn collect(gpa: std.mem.Allocator, doc: []const u8) !Set {
             if (attr(tag, "y1")) |v| d.y1 = num(v);
             if (attr(tag, "x2")) |v| d.x2 = num(v);
             if (attr(tag, "y2")) |v| d.y2 = num(v);
+            if (attr(tag, "gradientTransform")) |t| d.xform = transform.parse(t);
             if (attr(tag, "gradientUnits")) |u| {
                 d.user_space = std.mem.eql(u8, std.mem.trim(u8, u, " \t\r\n"), "userSpaceOnUse");
                 d.units_declared_obb = !d.user_space;
