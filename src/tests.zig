@@ -854,3 +854,62 @@ test "a gradient with no gradientTransform is unchanged" {
     try t.expectApproxEqAbs(@as(f32, 20), g.x1, 0.01);
     try t.expectApproxEqAbs(@as(f32, 0), g.y1, 0.01);
 }
+
+
+// ------------------------------------------------------------ blind-spot fixture
+// <line> and currentColor were both broken while the suite was green: every
+// other test draws a <rect> or a <path>, and neither fixture icon uses either
+// feature. These exist to fail loudly if the shape arms regress again.
+
+test "a stroked <line> produces geometry" {
+    // The bug: <line> returned before emitting anything, correct when only
+    // fills existed and wrong once strokes became outlines. Asserting on the
+    // edge count alone is not enough -- a stroked line's outline is the only
+    // geometry it can ever have.
+    const svg =
+        \\<svg viewBox="0 0 20 20">
+        \\  <line x1="4" y1="10" x2="16" y2="10" stroke="#000000" stroke-width="2"/>
+        \\</svg>
+    ;
+    var icon = try mag.parseIconSized(t.allocator, svg, 20, 20);
+    defer icon.deinit(t.allocator);
+
+    try t.expect(icon.edges.items.len > 0);
+    try t.expect(icon.report.stroked >= 1);
+
+    // And it inks: a horizontal bar across the middle row, nothing at the top.
+    var px: [20 * 20 * 4]u8 = undefined;
+    @memset(&px, 0);
+    var acc: [20]f32 = undefined;
+    var r = mag.Raster{ .gpa = t.allocator, .w = 20, .h = 20, .px = &px, .acc = &acc };
+    defer r.xs.deinit(t.allocator);
+    icon.draw(&r, .{ 0, 0, 0 });
+
+    try t.expect(px[(10 * 20 + 10) * 4 + 3] > 200);
+    try t.expectEqual(@as(u8, 0), px[(2 * 20 + 10) * 4 + 3]);
+}
+
+test "currentColor takes the caller colour, not black" {
+    // currentColor has no value inside an icon: the icon does not know the
+    // page's colour, so the draw-time default supplies it. Falling through to
+    // black would silently override every themed icon.
+    const svg =
+        \\<svg viewBox="0 0 20 20">
+        \\  <rect x="4" y="4" width="12" height="12" fill="currentColor"/>
+        \\</svg>
+    ;
+    var icon = try mag.parseIconSized(t.allocator, svg, 20, 20);
+    defer icon.deinit(t.allocator);
+
+    var px: [20 * 20 * 4]u8 = undefined;
+    @memset(&px, 0);
+    var acc: [20]f32 = undefined;
+    var r = mag.Raster{ .gpa = t.allocator, .w = 20, .h = 20, .px = &px, .acc = &acc };
+    defer r.xs.deinit(t.allocator);
+    icon.draw(&r, .{ 17, 200, 90 });
+
+    const o = (10 * 20 + 10) * 4;
+    try t.expectEqual(@as(u8, 17), px[o]);
+    try t.expectEqual(@as(u8, 200), px[o + 1]);
+    try t.expectEqual(@as(u8, 90), px[o + 2]);
+}
