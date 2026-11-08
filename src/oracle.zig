@@ -24,7 +24,10 @@ pub fn main(init: std.process.Init) !void {
     defer icon.deinit(gpa);
     const px = try gpa.alloc(u8, 96 * 96 * 4);
     defer gpa.free(px);
-    @memset(px, 255);
+    // Transparent, not white. A reference renderer leaves untouched pixels at
+    // alpha 0, and filling the canvas opaque is what made every untouched
+    // pixel disagree with it.
+    @memset(px, 0);
     const acc = try gpa.alloc(f32, 96);
     defer gpa.free(acc);
     var r = mag.Raster{ .gpa = gpa, .w = 96, .h = 96, .px = px, .acc = acc };

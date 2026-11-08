@@ -134,6 +134,12 @@ pub const Scanner = struct {
     fn isSkipTag(name: []const u8) bool {
         const tags = [_][]const u8{ "defs", "clipPath", "mask", "symbol", "pattern", "marker", "style", "title", "desc", "metadata" };
         for (tags) |t| if (std.mem.eql(u8, name, t)) return true;
+        // Editor namespaces carry document state, not artwork. Inkscape writes
+        // <sodipodi:namedview opacity="0.149"> as a SIBLING of <defs>, and its
+        // opacity was absorbed into inherited state and stamped onto every
+        // subsequent shape -- the whole daisy rendered at 15% over white.
+        const editor_ns = [_][]const u8{ "sodipodi:", "inkscape:", "rdf:", "cc:", "dc:" };
+        for (editor_ns) |p| if (std.mem.startsWith(u8, name, p)) return true;
         return false;
     }
 
