@@ -21,6 +21,18 @@ pub const LinearDef = struct {
     /// True only when `gradientUnits="userSpaceOnUse"`. The SVG default is
     /// objectBoundingBox, which cannot be resolved without the element bbox.
     units_declared_obb: bool = false,
+    /// True for `<radialGradient>`. Both kinds share this record because they
+    /// share every other attribute: units, href, transform, stops. Only the
+    /// geometry in the gradient's own frame differs.
+    radial: bool = false,
+    /// Radial geometry, in the gradient's own frame like x1/y1/x2/y2.
+    /// `fx/fy` is the focal point; when absent it is the centre, which is the
+    /// common case and makes the colour rings concentric.
+    cx: f32 = 0.5,
+    cy: f32 = 0.5,
+    r: f32 = 0.5,
+    fx: ?f32 = null,
+    fy: ?f32 = null,
     /// `gradientTransform`. Applied in gradient space, before the CTM: the
     /// axis coordinates x1/y1/x2/y2 are given in the gradient's own frame and
     /// this matrix moves them from there into user space.
@@ -137,6 +149,30 @@ pub fn collect(gpa: std.mem.Allocator, doc: []const u8) !Set {
             if (attr(tag, "y1")) |v| d.y1 = num(v);
             if (attr(tag, "x2")) |v| d.x2 = num(v);
             if (attr(tag, "y2")) |v| d.y2 = num(v);
+            if (attr(tag, "gradientTransform")) |t| d.xform = transform.parse(t);
+            if (attr(tag, "gradientUnits")) |u| {
+                d.user_space = std.mem.eql(u8, std.mem.trim(u8, u, " \t\r\n"), "userSpaceOnUse");
+                d.units_declared_obb = !d.user_space;
+            } else {
+                d.units_declared_obb = true;
+            }
+            try set.items.append(gpa, d);
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, tag, "radialGradient")) {
+            const id = attr(tag, "id") orelse continue;
+            var d = LinearDef{ .id = id, .radial = true };
+            if (attr(tag, "xlink:href")) |h| d.href = refId(h) orelse h;
+            if (attr(tag, "href")) |h| d.href = refId(h) orelse h;
+            // cx/cy/r/fx/fy are FRACTIONS under the default objectBoundingBox
+            // and user units under userSpaceOnUse, exactly like the linear
+            // axis. Stored raw; the unit conversion happens at placement.
+            if (attr(tag, "cx")) |v| d.cx = num(v) orelse d.cx;
+            if (attr(tag, "cy")) |v| d.cy = num(v) orelse d.cy;
+            if (attr(tag, "r")) |v| d.r = num(v) orelse d.r;
+            if (attr(tag, "fx")) |v| d.fx = num(v);
+            if (attr(tag, "fy")) |v| d.fy = num(v);
             if (attr(tag, "gradientTransform")) |t| d.xform = transform.parse(t);
             if (attr(tag, "gradientUnits")) |u| {
                 d.user_space = std.mem.eql(u8, std.mem.trim(u8, u, " \t\r\n"), "userSpaceOnUse");

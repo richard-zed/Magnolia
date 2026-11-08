@@ -48,7 +48,7 @@ pub const Icon = struct {
     colors: std.ArrayList(?[3]u8) = .empty,
     /// Parallel to `edges`; a non-null entry means that edge is painted by a
     /// paint server and `colors` for it stays null.
-    gradients: std.ArrayList(?gradient.Linear) = .empty,
+    gradients: std.ArrayList(?gradient.Paint) = .empty,
     /// Stop arrays allocated while resolving paint servers. Owned here so
     /// `Icon` can free them; each gradient's `stops` slice points into this.
     grad_stops: std.ArrayList([]gradient.Stop) = .empty,
@@ -71,17 +71,17 @@ pub const Icon = struct {
     /// each span used, not about paint order.
     pub fn draw(self: *const Icon, r: *raster.Raster, col: [3]u8) void {
         var i: usize = 0;
-        while (i < self.edges.items.len) : (i += 1) {
+        outer: while (i < self.edges.items.len) : (i += 1) {
             const rule: raster.FillRule = if (i < self.rules.items.len) self.rules.items[i] else .nonzero;
             const alpha: f32 = if (i < self.alphas.items.len) self.alphas.items[i] else 1;
             const ecl: ?[3]u8 = if (i < self.colors.items.len) self.colors.items[i] else null;
-            const egl: ?gradient.Linear = if (i < self.gradients.items.len) self.gradients.items[i] else null;
+            const egl: ?gradient.Paint = if (i < self.gradients.items.len) self.gradients.items[i] else null;
             var j = i;
             while (j < self.edges.items.len) : (j += 1) {
                 const rj: raster.FillRule = if (j < self.rules.items.len) self.rules.items[j] else .nonzero;
                 const aj: f32 = if (j < self.alphas.items.len) self.alphas.items[j] else 1;
                 const cj: ?[3]u8 = if (j < self.colors.items.len) self.colors.items[j] else null;
-                const gj: ?gradient.Linear = if (j < self.gradients.items.len) self.gradients.items[j] else null;
+                const gj: ?gradient.Paint = if (j < self.gradients.items.len) self.gradients.items[j] else null;
                 if (rj != rule or aj != alpha) break;
                 // Null and explicit colour are both "same group" when neither
                 // side names one; compare the optionals directly so a run of
@@ -101,7 +101,24 @@ pub const Icon = struct {
                 if (gj != null and egl != null) {
                     const gv = gj.?;
                     const ev = egl.?;
-                    if (gv.stops.ptr != ev.stops.ptr or gv.stops.len != ev.stops.len) break;
+                    const gs = gv.stops();
+                    const es = ev.stops();
+                    if (gs.ptr != es.ptr or gs.len != es.len) break :outer;
+                    // Stops alone identify a LINEAR gradient: its axis lives in
+                    // the coordinates, and two elements sharing a def share
+                    // those. A radial is identified by centre and radius too,
+                    // which differ per element under objectBoundingBox even
+                    // when the def is the same -- so batching on stops alone
+                    // would paint a second circle with the first one's
+                    // geometry.
+                    switch (gv) {
+                        .linear => if (ev != .linear) break :outer,
+                        .radial => {
+                            const gr = gv.radial;
+                            const er = ev.radial;
+                            if (gr.cx != er.cx or gr.cy != er.cy or gr.r != er.r) break :outer;
+                        },
+                    }
                 }
             }
             if (egl) |g| {

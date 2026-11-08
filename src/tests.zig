@@ -623,7 +623,7 @@ test "an href chain borrows the referenced gradient's stops" {
     var found = false;
     for (icon.gradients.items) |g| {
         if (g) |gg| {
-            try t.expectEqual(@as(usize, 2), gg.stops.len);
+            try t.expectEqual(@as(usize, 2), gg.stops().len);
             found = true;
         }
     }
@@ -654,12 +654,12 @@ test "objectBoundingBox maps fractions of the element box" {
     defer icon.deinit(t.allocator);
 
     // Placed gradient: axis must be the rect's box, not the viewBox.
-    var g: ?mag.gradient.Linear = null;
+    var g: ?mag.gradient.Paint = null;
     for (icon.gradients.items) |it| if (it) |gg| {
         g = gg;
         break;
     };
-    const lin = g orelse return error.NoGradient;
+    const lin = (g orelse return error.NoGradient).linear;
     try t.expectApproxEqAbs(@as(f32, 5), lin.x0, 0.01);
     try t.expectApproxEqAbs(@as(f32, 15), lin.x1, 0.01);
 
@@ -813,12 +813,12 @@ test "gradientTransform rotates the axis in gradient space" {
     var icon = try mag.parseIcon(t.allocator, src);
     defer icon.deinit(t.allocator);
 
-    var found: ?mag.gradient.Linear = null;
+    var found: ?mag.gradient.Paint = null;
     for (icon.gradients.items) |g| if (g) |gg| {
         found = gg;
         break;
     };
-    const g = found orelse return error.NoGradient;
+    const g = (found orelse return error.NoGradient).linear;
 
     // Declared horizontal, rotated 90 degrees about the centre: the axis must
     // come back vertical, top to bottom.
@@ -844,12 +844,12 @@ test "a gradient with no gradientTransform is unchanged" {
     var icon = try mag.parseIcon(t.allocator, src);
     defer icon.deinit(t.allocator);
 
-    var found: ?mag.gradient.Linear = null;
+    var found: ?mag.gradient.Paint = null;
     for (icon.gradients.items) |g| if (g) |gg| {
         found = gg;
         break;
     };
-    const g = found orelse return error.NoGradient;
+    const g = (found orelse return error.NoGradient).linear;
     try t.expectApproxEqAbs(@as(f32, 0), g.x0, 0.01);
     try t.expectApproxEqAbs(@as(f32, 20), g.x1, 0.01);
     try t.expectApproxEqAbs(@as(f32, 0), g.y1, 0.01);
@@ -932,15 +932,89 @@ test "a gradient with no gradientUnits attribute uses the SVG default" {
     var icon = try mag.parseIconSized(t.allocator, svg, 20, 20);
     defer icon.deinit(t.allocator);
 
-    var g: ?mag.gradient.Linear = null;
+    var g: ?mag.gradient.Paint = null;
     for (icon.gradients.items) |it| if (it) |gg| {
         g = gg;
         break;
     };
-    const lin = g orelse return error.NoGradient;
+    const lin = (g orelse return error.NoGradient).linear;
     // Fractions of a rect at x=5 w=10 -> user space 5..15.
     try t.expectApproxEqAbs(@as(f32, 5), lin.x0, 0.01);
     try t.expectApproxEqAbs(@as(f32, 15), lin.x1, 0.01);
     // And it must not be reported as unsupported.
     try t.expect(!reportsContains(&icon, "objectBoundingBox"));
+}
+
+
+// ------------------------------------------------------------------- radials
+test "a radial gradient is concentric and centred" {
+    // userSpaceOnUse so the geometry is concrete: centre (10,10), r=8.
+    // Sampling red at the centre and blue at the rim cannot be faked by a
+    // linear sweep, which would band in one direction across the shape.
+    const svg =
+        \\<svg viewBox="0 0 20 20">
+        \\  <defs>
+        \\    <radialGradient id="r" gradientUnits="userSpaceOnUse"
+        \\                    cx="10" cy="10" r="8">
+        \\      <stop offset="0" stop-color="#ff0000"/>
+        \\      <stop offset="1" stop-color="#0000ff"/>
+        \\    </radialGradient>
+        \\  </defs>
+        \\  <rect x="0" y="0" width="20" height="20" fill="url(#r)"/>
+        \\</svg>
+    ;
+    var icon = try mag.parseIconSized(t.allocator, svg, 20, 20);
+    defer icon.deinit(t.allocator);
+
+    var px: [20 * 20 * 4]u8 = undefined;
+    @memset(&px, 0);
+    var acc: [20]f32 = undefined;
+    var r = mag.Raster{ .gpa = t.allocator, .w = 20, .h = 20, .px = &px, .acc = &acc };
+    defer r.xs.deinit(t.allocator);
+    icon.draw(&r, .{ 0, 0, 0 });
+
+    const centre = (10 * 20 + 10) * 4;
+    // Near the rim along +x, still inside r=8 from (10,10).
+    const rim = (10 * 20 + 17) * 4;
+    // Perpendicular check: same distance from centre, different direction.
+    const rim_y = (17 * 20 + 10) * 4;
+
+    try t.expect(px[centre] > 200 and px[centre + 2] < 60);
+    try t.expect(px[rim + 2] > 200 and px[rim] < 60);
+    // Concentric means the colour depends on distance, not direction. If the
+    // radial were laid out along one axis these two would differ sharply.
+    const dy: i32 = @as(i32, px[rim_y]) - @as(i32, px[rim]);
+    try t.expect(@abs(dy) < 24);
+    const dyb: i32 = @as(i32, px[rim_y + 2]) - @as(i32, px[rim + 2]);
+    try t.expect(@abs(dyb) < 24);
+}
+
+test "a radial under the default unit is sized by the element box" {
+    // objectBoundingBox: r is a fraction of the box's normalised diagonal.
+    // A 10x10 box at (5,5) gives r = 0.5 of that, so the falloff must reach
+    // the box edges rather than the viewBox edges.
+    const svg =
+        \\<svg viewBox="0 0 20 20">
+        \\  <defs>
+        \\    <radialGradient id="r" cx="0.5" cy="0.5" r="0.5">
+        \\      <stop offset="0" stop-color="#ff0000"/>
+        \\      <stop offset="1" stop-color="#0000ff"/>
+        \\    </radialGradient>
+        \\  </defs>
+        \\  <rect x="5" y="5" width="10" height="10" fill="url(#r)"/>
+        \\</svg>
+    ;
+    var icon = try mag.parseIconSized(t.allocator, svg, 20, 20);
+    defer icon.deinit(t.allocator);
+
+    var g: ?mag.gradient.Paint = null;
+    for (icon.gradients.items) |it| if (it) |gg| {
+        g = gg;
+        break;
+    };
+    const rad = (g orelse return error.NoGradient).radial;
+    // Centre of the rect, and a radius that puts the rim on the box edge.
+    try t.expectApproxEqAbs(@as(f32, 10), rad.cx, 0.01);
+    try t.expectApproxEqAbs(@as(f32, 10), rad.cy, 0.01);
+    try t.expectApproxEqAbs(@as(f32, 5), rad.r, 0.01);
 }

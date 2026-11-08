@@ -58,7 +58,7 @@ pub const Raster = struct {
     /// `grad.sample` at each pixel centre instead of a constant. Coverage and
     /// alpha accumulation are identical -- only the colour source differs --
     /// so a gradient antialiases against its own edge exactly like a flat fill.
-    pub fn fillRuleGradient(self: *Raster, edges: []const Edge, grad: gradient.Linear, rule: FillRule, opacity: f32) void {
+    pub fn fillRuleGradient(self: *Raster, edges: []const Edge, grad: gradient.Paint, rule: FillRule, opacity: f32) void {
         const alpha = std.math.clamp(opacity, 0, 1);
         if (alpha <= 0) return;
         self.spanPass(edges, rule, .{ .grad = .{ .grad = grad, .opacity = alpha } });
@@ -66,7 +66,7 @@ pub const Raster = struct {
 
     const PaintSrc = union(enum) {
         flat: struct { col: [3]u8, opacity: f32 },
-        grad: struct { grad: gradient.Linear, opacity: f32 },
+        grad: struct { grad: gradient.Paint, opacity: f32 },
     };
 
     /// The per-span colour decision, factored out so the two fill entry points
@@ -132,7 +132,7 @@ pub const Raster = struct {
                 const fx = @as(f32, @floatFromInt(x)) + 0.5;
                 const cols: [4]f32 = switch (src) {
                     .flat => |f| .{ @floatFromInt(f.col[0]), @floatFromInt(f.col[1]), @floatFromInt(f.col[2]), 1 },
-                    .grad => |g| g.grad.sample(0, fx, fy),
+                    .grad => |g| g.grad.sample(fx, fy),
                 };
                 // A gradient stop carries its own opacity, which is PAINT
                 // opacity and must not be confused with shape coverage. Using

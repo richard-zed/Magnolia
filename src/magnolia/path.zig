@@ -35,7 +35,7 @@ pub const PathBuf = struct {
     /// Parallel to `edges`. Set when the element's fill is a paint server;
     /// `colors` stays null in that case so a caller unaware of gradients keeps
     /// its old behaviour.
-    gradients: std.ArrayList(?gradient.Linear) = .empty,
+    gradients: std.ArrayList(?gradient.Paint) = .empty,
     /// Parallel to `edges`; see `Icon.alphas`.
     alphas: std.ArrayList(f32) = .empty,
     /// Opacity stamped onto every edge emitted from now on. Set per element
@@ -45,7 +45,7 @@ pub const PathBuf = struct {
     /// means the element declared no colour and the renderer's default stands.
     color: ?[3]u8 = null,
     /// Gradient fill stamped onto every edge, same lifetime as `color`.
-    grad: ?gradient.Linear = null,
+    grad: ?gradient.Paint = null,
     /// A paint server that could not be placed yet, because
     /// `gradientUnits="objectBoundingBox"` needs the element's bounding box
     /// and the box is not known until the element is finished. Carried to the

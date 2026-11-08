@@ -32,7 +32,7 @@ const StrokeState = struct {
     /// Gradient stroke (`stroke:url(#g)`). Parallel to `color` for exactly the
     /// same reason the fill has a separate `grad`: a paint server replaces the
     /// flat colour rather than supplementing it.
-    grad: ?gradient.Linear = null,
+    grad: ?gradient.Paint = null,
 };
 const DStats = pathdata.DStats;
 
@@ -44,6 +44,7 @@ const GradResult = union(enum) {
     /// Needs the element's bounding box; resolve once the element is closed.
     needs_box,
     linear: gradient.Linear,
+    radial: gradient.Radial,
 };
 const Pt = geom.Pt;
 const scanNum = numbers.scanNum;
@@ -156,7 +157,7 @@ pub const Scanner = struct {
     grad_stops: std.ArrayList([]gradient.Stop) = .empty,
     /// Inherited gradient fill. Set when an ancestor's fill resolved to a
     /// paint server; `inherited_fill` stays null so the flat path is unchanged.
-    inherited_grad: ?gradient.Linear = null,
+    inherited_grad: ?gradient.Paint = null,
 
     fn isSkipTag(name: []const u8) bool {
         const tags = [_][]const u8{ "defs", "clipPath", "mask", "symbol", "pattern", "marker", "style", "title", "desc", "metadata" };
@@ -328,22 +329,24 @@ pub const Scanner = struct {
         // that referred to edges which no longer exist.
         if (scratch.pending_grad) |pg| {
             if (scratchBounds(scratch.edges.items)) |bx| {
-                switch (self.resolveGradient(pg.val, pg.eff, bx)) {
-                    .linear => |g| {
-                        scratch.grad = g;
-                        scratch.color = null;
-                        // The per-edge arrays were written DURING the element,
-                        // while the paint was still deferred, so they hold the
-                        // null of a failed attempt. The transfer prefers the
-                        // per-edge entry over `scratch.grad`, so without this
-                        // the resolved gradient is correct and never copied.
-                        for (scratch.gradients.items) |*slot| slot.* = g;
-                        for (scratch.colors.items) |*slot| slot.* = null;
-                    },
+                const placed: ?gradient.Paint = switch (self.resolveGradient(pg.val, pg.eff, bx)) {
+                    .linear => |g| gradient.Paint{ .linear = g },
+                    .radial => |g| gradient.Paint{ .radial = g },
                     // Still nothing: the definition is genuinely missing. The
                     // element keeps whatever flat colour it inherited, which
                     // is what an unplaceable paint server degrades to.
-                    .needs_box, .none => {},
+                    .needs_box, .none => null,
+                };
+                if (placed) |g| {
+                    scratch.grad = g;
+                    scratch.color = null;
+                    // The per-edge arrays were written DURING the element,
+                    // while the paint was still deferred, so they hold the
+                    // null of a failed attempt. The transfer prefers the
+                    // per-edge entry over `scratch.grad`, so without this
+                    // the resolved gradient is correct and never copied.
+                    for (scratch.gradients.items) |*slot| slot.* = g;
+                    for (scratch.colors.items) |*slot| slot.* = null;
                 }
             }
             scratch.pending_grad = null;
@@ -401,7 +404,7 @@ pub const Scanner = struct {
         // here painted the daisy's white petals in whatever the shape's fill
         // resolved to.
         const stroke_color: ?[3]u8 = if (self.inherited_stroke) |s| s.color else null;
-        const stroke_grad: ?gradient.Linear = if (self.inherited_stroke) |s| s.grad else null;
+        const stroke_grad: ?gradient.Paint = if (self.inherited_stroke) |s| s.grad else null;
         var pts: std.ArrayList(Pt) = .empty;
         defer pts.deinit(self.gpa);
         var out: std.ArrayList(geom.Edge) = .empty;
@@ -604,7 +607,13 @@ pub const Scanner = struct {
                     switch (self.resolveGradient(s, eff, null)) {
                         .linear => |g| {
                             var cur = self.inherited_stroke orelse StrokeState{};
-                            cur.grad = g;
+                            cur.grad = .{ .linear = g };
+                            cur.color = null;
+                            self.inherited_stroke = cur;
+                        },
+                        .radial => |g| {
+                            var cur = self.inherited_stroke orelse StrokeState{};
+                            cur.grad = .{ .radial = g };
                             cur.color = null;
                             self.inherited_stroke = cur;
                         },
@@ -737,7 +746,8 @@ pub const Scanner = struct {
     /// it can be, deferred when it needs the element's bounding box.
     fn applyGrad(self: *Scanner, val: []const u8, eff: Mat) void {
         switch (self.resolveGradient(val, eff, null)) {
-            .linear => |g| self.pb.grad = g,
+            .linear => |g| self.pb.grad = gradient.Paint{ .linear = g },
+            .radial => |g| self.pb.grad = gradient.Paint{ .radial = g },
             .needs_box => self.pb.pending_grad = .{ .val = val, .eff = eff },
             .none => {},
         }
@@ -796,6 +806,47 @@ pub const Scanner = struct {
         for (stops, 0..) |sdef, k| {
             out_stops[k] = .{ .offset = sdef.offset, .color = sdef.color, .opacity = sdef.opacity };
         }
+        const xf = d.xform orelse cur.xform orelse geom.Mat{};
+
+        // Radial: centre and radius in the gradient's own frame, mapped to
+        // user space through the element box when the unit is box-relative.
+        //
+        // The box is NOT square, so a single `r` given as a fraction has to
+        // pick an axis. SVG says to use the box DIAGONAL divided by sqrt(2),
+        // which makes a circle fill the box exactly when the box is square and
+        // keeps it inside the box otherwise. Using width alone would overflow
+        // a tall element and using the smaller side would under-fill a wide
+        // one; the diagonal is the compromise the spec settled on.
+        if (d.radial) {
+            const cw = if (box) |b| b.x1 - b.x0 else 1;
+            const ch = if (box) |b| b.y1 - b.y0 else 1;
+            const scale = @sqrt((cw * cw + ch * ch) / 2.0);
+            const ox: f32 = if (box) |b| b.x0 else 0;
+            const oy: f32 = if (box) |b| b.y0 else 0;
+
+            const cx_u = ox + d.cx * cw;
+            const cy_u = oy + d.cy * ch;
+            // `r` is a fraction of the normalised diagonal, not of an axis.
+            const r_u = d.r * scale;
+
+            const c_dev = eff.apply(xf.apply(.{ .x = cx_u, .y = cy_u }));
+            // The transform can scale and rotate, so the radius has to be
+            // carried through it too. Transform the rim point rather than
+            // scaling r by a factor: a rotation alone would be wasted work
+            // otherwise, and a non-uniform scale has no single correct
+            // scalar anyway -- measuring the actual rim point is the closest
+            // honest answer, matching how stroke width is approximated.
+            const rim = eff.apply(xf.apply(.{ .x = cx_u + r_u, .y = cy_u }));
+            const dx = rim.x - c_dev.x;
+            const dy = rim.y - c_dev.y;
+            return .{ .radial = .{
+                .cx = c_dev.x,
+                .cy = c_dev.y,
+                .r = @sqrt(dx * dx + dy * dy),
+                .stops = out_stops,
+            } };
+        }
+
         // objectBoundingBox: x1/y1/x2/y2 are FRACTIONS of the element's box,
         // defaulting to 0,0 -> 1,0 (a left-to-right sweep across the shape).
         // Map the fraction into user space before anything else touches it.
@@ -823,7 +874,6 @@ pub const Scanner = struct {
         //
         // Inherited through the href chain like the stops: a gradient with no
         // axis of its own takes both from the one it points at.
-        const xf = d.xform orelse cur.xform orelse geom.Mat{};
         const p0 = eff.apply(xf.apply(ax[0]));
         const p1 = eff.apply(xf.apply(ax[1]));
         return .{ .linear = .{ .x0 = p0.x, .y0 = p0.y, .x1 = p1.x, .y1 = p1.y, .stops = out_stops } };

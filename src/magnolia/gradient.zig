@@ -38,22 +38,73 @@ pub const Linear = struct {
         const tt = std.math.clamp(u, 0, 1);
         _ = t;
 
-        if (self.stops.len == 0) return .{ 0, 0, 0, 0 };
-        if (self.stops.len == 1) {
-            const s = self.stops[0];
-            return .{ @floatFromInt(s.color[0]), @floatFromInt(s.color[1]), @floatFromInt(s.color[2]), s.opacity };
-        }
-        var i: usize = 0;
-        while (i + 1 < self.stops.len and self.stops[i + 1].offset < tt) : (i += 1) {}
-        const a = self.stops[i];
-        const b = self.stops[@min(i + 1, self.stops.len - 1)];
-        const span = b.offset - a.offset;
-        const k = if (span <= 0) 0 else std.math.clamp((tt - a.offset) / span, 0, 1);
-        return .{
-            std.math.lerp(@as(f32, @floatFromInt(a.color[0])), @as(f32, @floatFromInt(b.color[0])), k),
-            std.math.lerp(@as(f32, @floatFromInt(a.color[1])), @as(f32, @floatFromInt(b.color[1])), k),
-            std.math.lerp(@as(f32, @floatFromInt(a.color[2])), @as(f32, @floatFromInt(b.color[2])), k),
-            std.math.lerp(a.opacity, b.opacity, k),
+        return rampAt(self.stops, tt);
+    }
+};
+
+/// Interpolate the stop ramp at `t` in 0..1.
+///
+/// Shared by both gradient kinds: the ramp is identical, and only how a pixel
+/// becomes `t` differs (projection onto an axis, distance from a centre). Keeping
+/// one implementation is what stops radial from drifting from linear on
+/// edge cases like one stop, zero-width spans, and out-of-range t.
+pub fn rampAt(stops: []const Stop, t: f32) [4]f32 {
+    if (stops.len == 0) return .{ 0, 0, 0, 0 };
+    if (stops.len == 1) {
+        const s = stops[0];
+        return .{ @floatFromInt(s.color[0]), @floatFromInt(s.color[1]), @floatFromInt(s.color[2]), s.opacity };
+    }
+    const tt = std.math.clamp(t, 0, 1);
+    var i: usize = 0;
+    while (i + 1 < stops.len and stops[i + 1].offset < tt) : (i += 1) {}
+    const a = stops[i];
+    const b = stops[@min(i + 1, stops.len - 1)];
+    const span = b.offset - a.offset;
+    const k = if (span <= 0) 0 else std.math.clamp((tt - a.offset) / span, 0, 1);
+    return .{
+        std.math.lerp(@as(f32, @floatFromInt(a.color[0])), @as(f32, @floatFromInt(b.color[0])), k),
+        std.math.lerp(@as(f32, @floatFromInt(a.color[1])), @as(f32, @floatFromInt(b.color[1])), k),
+        std.math.lerp(@as(f32, @floatFromInt(a.color[2])), @as(f32, @floatFromInt(b.color[2])), k),
+        std.math.lerp(a.opacity, b.opacity, k),
+    };
+}
+
+/// A radial gradient in device space.
+pub const Radial = struct {
+    /// Centre and radius, already through the CTM.
+    cx: f32,
+    cy: f32,
+    r: f32,
+    stops: []Stop,
+
+    pub fn sample(self: Radial, px: f32, py: f32) [4]f32 {
+        if (self.r <= 0) return rampAt(self.stops, 1);
+        const dx = px - self.cx;
+        const dy = py - self.cy;
+        const d = @sqrt(dx * dx + dy * dy);
+        return rampAt(self.stops, d / self.r);
+    }
+};
+
+/// Any paint server, after placement.
+///
+/// The stops slice lives in the Icon's arena in both cases, so identity
+/// comparisons for batching work the same way whichever kind it is.
+pub const Paint = union(enum) {
+    linear: Linear,
+    radial: Radial,
+
+    pub fn stops(p: Paint) []Stop {
+        return switch (p) {
+            .linear => |g| g.stops,
+            .radial => |g| g.stops,
+        };
+    }
+
+    pub fn sample(p: Paint, px: f32, py: f32) [4]f32 {
+        return switch (p) {
+            .linear => |g| g.sample(0, px, py),
+            .radial => |g| g.sample(px, py),
         };
     }
 };
