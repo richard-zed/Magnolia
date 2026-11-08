@@ -913,3 +913,34 @@ test "currentColor takes the caller colour, not black" {
     try t.expectEqual(@as(u8, 200), px[o + 1]);
     try t.expectEqual(@as(u8, 90), px[o + 2]);
 }
+
+
+test "a gradient with no gradientUnits attribute uses the SVG default" {
+    // gradientUnits is optional and defaults to objectBoundingBox. An SVG that
+    // simply omits it is valid and box-relative; refusing it painted the shape
+    // flat, which looks like a missing gradient rather than an unsupported one.
+    // This test has no gradientUnits attribute anywhere.
+    const svg =
+        \\<svg viewBox="0 0 20 20">
+        \\  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="0">
+        \\    <stop offset="0" stop-color="#ff0000"/>
+        \\    <stop offset="1" stop-color="#0000ff"/>
+        \\  </linearGradient></defs>
+        \\  <rect x="5" y="5" width="10" height="10" fill="url(#g)"/>
+        \\</svg>
+    ;
+    var icon = try mag.parseIconSized(t.allocator, svg, 20, 20);
+    defer icon.deinit(t.allocator);
+
+    var g: ?mag.gradient.Linear = null;
+    for (icon.gradients.items) |it| if (it) |gg| {
+        g = gg;
+        break;
+    };
+    const lin = g orelse return error.NoGradient;
+    // Fractions of a rect at x=5 w=10 -> user space 5..15.
+    try t.expectApproxEqAbs(@as(f32, 5), lin.x0, 0.01);
+    try t.expectApproxEqAbs(@as(f32, 15), lin.x1, 0.01);
+    // And it must not be reported as unsupported.
+    try t.expect(!reportsContains(&icon, "objectBoundingBox"));
+}
