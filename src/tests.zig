@@ -1018,3 +1018,92 @@ test "a radial under the default unit is sized by the element box" {
     try t.expectApproxEqAbs(@as(f32, 10), rad.cy, 0.01);
     try t.expectApproxEqAbs(@as(f32, 5), rad.r, 0.01);
 }
+
+
+test "a white stop fading to transparent ends dark over a black background" {
+    // Straight RGB interpolation between white-alpha-1 and white-alpha-0 is
+    // white everywhere: both endpoints have identical RGB, so the colour never
+    // moves and only alpha shrinks. Composited over black the ramp must still
+    // darken, because coverage carries the alpha. If the sample returns the
+    // raw white and the compositor multiplies by coverage, this passes; if the
+    // ramp is consulted only for RGB, the middle stays bright white.
+    const svg =
+        \\<svg viewBox="0 0 40 10">
+        \\  <defs>
+        \\    <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="40" y2="0">
+        \\      <stop offset="0" stop-color="#ffffff" stop-opacity="1"/>
+        \\      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+        \\    </linearGradient>
+        \\  </defs>
+        \\  <rect x="0" y="0" width="40" height="10" fill="url(#g)"/>
+        \\</svg>
+    ;
+    var icon = try mag.parseIconSized(t.allocator, svg, 40, 10);
+    defer icon.deinit(t.allocator);
+
+    var px: [40 * 10 * 4]u8 = undefined;
+    @memset(&px, 0); // black page
+    var acc: [40]f32 = undefined;
+    var r = mag.Raster{ .gpa = t.allocator, .w = 40, .h = 10, .px = &px, .acc = &acc };
+    defer r.xs.deinit(t.allocator);
+    icon.draw(&r, .{ 0, 0, 0 });
+
+    const near = px[(5 * 40 + 2) * 4];
+    const mid = px[(5 * 40 + 20) * 4];
+    const far = px[(5 * 40 + 38) * 4];
+    // Monotonic darkening is the whole point; one flat value means the ramp
+    // never reached the compositor.
+    try t.expect(near > mid);
+    try t.expect(mid > far);
+}
+
+
+test "two stops with different alpha interpolate unpremultiplied, like rsvg" {
+    // The case where premultiplied and straight interpolation disagree: both
+    // RGB and alpha move, so the two orderings give different midpoints.
+    // Reference is rsvg-convert on this exact file, sampled at row 5:
+    //   x=2  -> 239,0,16   x=10 -> 188,0,67   x=20 -> 125,0,130
+    //   x=30 -> 61,0,194   x=37 -> 13,0,236
+    // The midpoint (125,0,130) is the STRAIGHT lerp of red and blue. Had the
+    // ramp been premultiplied it would sit markedly closer to blue, since the
+    // blue end carries a tenth of the alpha. Matching rsvg is the requirement,
+    // so premultiplying here would be a regression, not a fix.
+    const svg =
+        \\<svg viewBox="0 0 40 10">
+        \\  <defs>
+        \\    <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="40" y2="0">
+        \\      <stop offset="0" stop-color="#ff0000" stop-opacity="1"/>
+        \\      <stop offset="1" stop-color="#0000ff" stop-opacity="0.1"/>
+        \\    </linearGradient>
+        \\  </defs>
+        \\  <rect x="0" y="0" width="40" height="10" fill="url(#g)"/>
+        \\</svg>
+    ;
+    var icon = try mag.parseIconSized(t.allocator, svg, 40, 10);
+    defer icon.deinit(t.allocator);
+
+    var px: [40 * 10 * 4]u8 = undefined;
+    @memset(&px, 0);
+    var acc: [40]f32 = undefined;
+    var r = mag.Raster{ .gpa = t.allocator, .w = 40, .h = 10, .px = &px, .acc = &acc };
+    defer r.xs.deinit(t.allocator);
+    icon.draw(&r, .{ 0, 0, 0 });
+
+    // Composited over black, so the stored value is the colour premultiplied
+    // by the accumulated alpha. Compare against rsvg's premultiplied product.
+    const ref = [_]struct { x: usize, rgb: [3]u8, a: u8 }{
+        .{ .x = 20, .rgb = .{ 125, 0, 130 }, .a = 137 },
+    };
+    for (ref) |c| {
+        const o = (5 * 40 + c.x) * 4;
+        // Blend over black: dest = colour * (a/255).
+        const scale: f32 = @as(f32, @floatFromInt(c.a)) / 255.0;
+        inline for (0..3) |ch| {
+            const want: f32 = @as(f32, @floatFromInt(c.rgb[ch])) * scale;
+            const got: f32 = @floatFromInt(px[o + ch]);
+            // Two antialiasing/rounding stacks; a couple of levels apart is
+            // rounding, a mid-tone gap is a different interpolation order.
+            try t.expect(@abs(got - want) < 6);
+        }
+    }
+}
