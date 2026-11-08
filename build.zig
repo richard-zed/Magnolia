@@ -4,9 +4,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const sakura_dep = b.dependency("sakura", .{ .target = target, .optimize = optimize });
-    const sakura = sakura_dep.module("sakura");
-
     const mod = b.addModule("magnolia", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -45,17 +42,27 @@ pub fn build(b: *std.Build) void {
 
     // Pixel verification goes through Sakura, an independent decoder. Checking
     // our output with a decoder written the same session as the encoder proves
-    // nothing.
-    const decode = b.addExecutable(.{
-        .name = "decode",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/decode.zig"),
+    // nothing -- but a SIBLING CHECKOUT is not a dependency. It lives at
+    // ../sakura on a developer's machine and nowhere on a CI runner, so it is
+    // off the default build and off the test step. Opt in with -Dsakura=<path>.
+    const sakura_path = b.option([]const u8, "sakura", "Path to a Sakura checkout, for the `decode` tool");
+    if (sakura_path) |sp| {
+        const sakura_mod = b.createModule(.{
+            .root_source_file = .{ .cwd_relative = b.pathJoin(&.{ sp, "src", "root.zig" }) },
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "sakura", .module = sakura }},
-        }),
-    });
-    b.installArtifact(decode);
+        });
+        const decode = b.addExecutable(.{
+            .name = "decode",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/decode.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "sakura", .module = sakura_mod }},
+            }),
+        });
+        b.installArtifact(decode);
+    }
 
     // `zig build sheet <out.png> <cell> <file.svg>...` needs argv. 0.17 removed
     // `Build.args` in favour of a run step that collects passthru arguments
@@ -77,7 +84,6 @@ pub fn build(b: *std.Build) void {
     // stayed green, because the test step only builds the module and the test
     // runner. A binary that does not compile is not a test failure unless the
     // test step depends on it.
-    test_step.dependOn(&decode.step);
     test_step.dependOn(&oracle.step);
     test_step.dependOn(&sheet.step);
 }
