@@ -645,7 +645,15 @@ pub const Scanner = struct {
             return;
         }
         if (std.mem.eql(u8, name, "line")) {
-            self.rep.add(self.gpa, "line is stroke-only, nothing to fill");
+            // A line has no interior of its own, but a stroked line does: the
+            // stroke pass turns the centreline into a closed outline. Dropping
+            // it as "nothing to fill" was correct before stroke-to-fill
+            // existed and wrong ever since -- <line> is a hamburger bar, a
+            // plus sign, a divider.
+            self.setM(eff);
+            self.pb.moveTo(.{ .x = at.num("x1", 0), .y = at.num("y1", 0) });
+            try self.pb.segTo(.{ .x = at.num("x2", 0), .y = at.num("y2", 0) });
+            self.rep.shapes += 1;
             return;
         }
         // Anything that reaches here is a tag this scanner does not draw:

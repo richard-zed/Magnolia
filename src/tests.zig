@@ -699,3 +699,60 @@ test "a 45 degree edge antialiases to half coverage" {
     try t.expectEqual(@as(u8, 0), px[(16 * 32 + 13) * 4]);
     try t.expectEqual(@as(u8, 255), px[(16 * 32 + 18) * 4]);
 }
+
+// -------------------------------------------------------------- currentColor
+// `currentColor` is the single most common paint value in icon sets: Feather,
+// Lucide and Tabler all put `fill="none" stroke="currentColor"` on the root
+// <svg> and expect the caller to choose. The failure this guards against is
+// that `parseColor` returns null for it, and every call site treats null as
+// "attribute absent" -- so a currentColor element and a colourless one are
+// indistinguishable, and nothing records that the caller's colour was asked
+// for. Both render wherever the fallback happens to land, which hides the bug.
+test "currentColor resolves to the caller's colour, not the fallback" {
+    const gpa = std.testing.allocator;
+    const src =
+        \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"
+        \\     fill="none" stroke="currentColor" stroke-width="4">
+        \\  <line x1="2" y1="8" x2="14" y2="8"/>
+        \\</svg>
+    ;
+    var icon = try mag.parseIcon(gpa, src);
+    defer icon.deinit(gpa);
+    const px = try gpa.alloc(u8, 16 * 16 * 4);
+    defer gpa.free(px);
+    @memset(px, 0);
+    const acc = try gpa.alloc(f32, 16);
+    defer gpa.free(acc);
+    var r = mag.Raster{ .gpa = gpa, .w = 16, .h = 16, .px = px, .acc = acc };
+    defer r.xs.deinit(gpa);
+    const caller: [3]u8 = .{ 0, 200, 100 };
+    icon.draw(&r, caller);
+    const o = (8 * 16 + 8) * 4;
+    try t.expectEqual(caller[0], px[o]);
+    try t.expectEqual(caller[1], px[o + 1]);
+    try t.expectEqual(caller[2], px[o + 2]);
+}
+
+test "an explicitly coloured stroke ignores the caller's colour" {
+    const gpa = std.testing.allocator;
+    const src =
+        \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"
+        \\     fill="none" stroke="#ff0000" stroke-width="4">
+        \\  <line x1="2" y1="8" x2="14" y2="8"/>
+        \\</svg>
+    ;
+    var icon = try mag.parseIcon(gpa, src);
+    defer icon.deinit(gpa);
+    const px = try gpa.alloc(u8, 16 * 16 * 4);
+    defer gpa.free(px);
+    @memset(px, 0);
+    const acc = try gpa.alloc(f32, 16);
+    defer gpa.free(acc);
+    var r = mag.Raster{ .gpa = gpa, .w = 16, .h = 16, .px = px, .acc = acc };
+    defer r.xs.deinit(gpa);
+    icon.draw(&r, .{ 0, 200, 100 });
+    const o = (8 * 16 + 8) * 4;
+    try t.expectEqual(@as(u8, 255), px[o]);
+    try t.expectEqual(@as(u8, 0), px[o + 1]);
+    try t.expectEqual(@as(u8, 0), px[o + 2]);
+}
