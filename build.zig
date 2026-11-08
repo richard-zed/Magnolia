@@ -58,15 +58,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(decode);
-    const rc = b.addExecutable(.{
-        .name = "rc",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/rc.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    b.installArtifact(rc);
 
     const run_sheet = b.addRunArtifact(sheet);
     run_sheet.step.dependOn(b.getInstallStep());
@@ -79,7 +70,6 @@ pub fn build(b: *std.Build) void {
     // runner. A binary that does not compile is not a test failure unless the
     // test step depends on it.
     test_step.dependOn(&decode.step);
-    test_step.dependOn(&rc.step);
     test_step.dependOn(&oracle.step);
     test_step.dependOn(&sheet.step);
 }
